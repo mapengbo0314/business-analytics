@@ -94,6 +94,26 @@ const STAGE_NEXT = {
   passed: "Archived",
 };
 
+// Normalize a listing from /api/scan or /api/listings into the card shape.
+const enrichListing = (p) => {
+  const missing = [];
+  if (p.asking == null) missing.push("Asking price");
+  if (p.sde == null) missing.push("Cash flow / SDE");
+  if (p.revenueT12 == null) missing.push("Revenue");
+  if (p.established == null) missing.push("Year established");
+  missing.push("T12 monthly P&L", "Add-back schedule");
+  return {
+    id: null, website: null, verifiedOn: null, broker: p.broker || null,
+    ...p,
+    name: p.name || "Untitled listing",
+    location: p.location || "Not stated",
+    asking: p.asking ?? null, sde: p.sde ?? null,
+    revenueT12: p.revenueT12 ?? null, established: p.established ?? null,
+    verify: p.verify || "search",
+    missing, note: p.note || "",
+  };
+};
+
 const copyText = async (t) => {
   try {
     await navigator.clipboard.writeText(t);
@@ -474,25 +494,7 @@ export default function App() {
     if (!r.ok) throw new Error(data.detail || data.error || "scan failed");
     if (data.status !== "ok" && data.status !== "empty")
       throw Object.assign(new Error(data.status), { siteState: data.status });
-    return (data.listings || []).map((p) => {
-      const missing = [];
-      if (p.asking == null) missing.push("Asking price");
-      if (p.sde == null) missing.push("Cash flow / SDE");
-      if (p.revenueT12 == null) missing.push("Revenue");
-      if (p.established == null) missing.push("Year established");
-      missing.push("T12 monthly P&L", "Add-back schedule");
-      return {
-        id: null,
-        name: p.name || "Untitled listing",
-        source: p.source || siteId, broker: p.broker || null,
-        location: p.location || "Not stated",
-        asking: p.asking ?? null, sde: p.sde ?? null,
-        revenueT12: p.revenueT12 ?? null, established: p.established ?? null,
-        listingUrl: p.listingUrl, website: null,
-        verify: "search", verifiedOn: null,
-        missing, note: p.note || "",
-      };
-    });
+    return (data.listings || []).map((p) => enrichListing({ ...p, source: p.source || siteId }));
   };
 
   const runScan = async (append = false) => {
@@ -531,6 +533,24 @@ export default function App() {
       setScanning(false);
     }
   };
+
+  // Fresh browser (no local cache): bootstrap the sheet from the shared
+  // server-side pool of previously scraped companies.
+  useEffect(() => {
+    let cached = null;
+    try { cached = JSON.parse(localStorage.getItem(POOL_KEY)); } catch (e) { /* none */ }
+    if (cached && Array.isArray(cached.deals) && cached.deals.length) return;
+    (async () => {
+      try {
+        const r = await fetch("/api/listings");
+        const data = await r.json();
+        if (r.ok && data.enabled && data.listings && data.listings.length) {
+          setPool((prev) => dedupe([...prev.filter((d) => d.verify === "live"), ...data.listings.map(enrichListing)]));
+        }
+      } catch (e) { /* pool store not configured — seeds remain */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Auto-refresh: scan on load when the cached pool is older than 5 hours, then
   // re-scan every 5 hours while the tab stays open (matches server cache + cron).

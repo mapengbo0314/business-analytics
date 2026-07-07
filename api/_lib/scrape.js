@@ -212,14 +212,25 @@ const STATE_ABBR = {
   "west virginia": "WV", wisconsin: "WI", wyoming: "WY",
 };
 
+const STATE_ABBR_SET = new Set(Object.values(STATE_ABBR));
+
 export function locationMatches(listing, location) {
   if (!location || !location.trim()) return true;
   const wanted = location.trim().toLowerCase();
   const hayRaw = `${listing.location || ""} ${listing.name || ""} ${listing.note || ""}`;
-  if (hayRaw.toLowerCase().includes(wanted)) return true;
+  const hay = hayRaw.toLowerCase();
+  if (hay.includes(wanted)) return true;
   const abbr = STATE_ABBR[wanted] || (/^[a-z]{2}$/.test(wanted) ? wanted.toUpperCase() : null);
-  if (abbr) return new RegExp(`\\b${abbr}\\b`).test(hayRaw);
-  return false;
+  if (abbr && new RegExp(`\\b${abbr}\\b`).test(hayRaw)) return true;
+  // No affirmative match. Most listings simply don't state a location — keep
+  // those (dropping them empties every scan). Drop only when the listing
+  // clearly names a DIFFERENT US state (", AZ" form or a full state name).
+  const statedAbbrs = [...hayRaw.matchAll(/,\s*([A-Z]{2})\b/g)].map((m) => m[1]);
+  if (statedAbbrs.some((s) => STATE_ABBR_SET.has(s) && s !== abbr)) return false;
+  for (const name of Object.keys(STATE_ABBR)) {
+    if (name !== wanted && new RegExp(`\\b${name}\\b`).test(hay)) return false;
+  }
+  return true;
 }
 
 function makeListing(src, name, url, text) {
