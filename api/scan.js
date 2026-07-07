@@ -10,7 +10,7 @@ import { SOURCES, scanSource } from "./_lib/scrape.js";
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "GET only" });
 
-  const { site, keyword, location = "", page = "1", meta } = req.query || {};
+  const { site, keyword, location = "", page = "1", meta, debug } = req.query || {};
 
   if (meta) {
     res.setHeader("Cache-Control", "public, s-maxage=86400");
@@ -23,10 +23,15 @@ export default async function handler(req, res) {
   if (!site || !keyword) return res.status(400).json({ error: "site and keyword required" });
   if (!SOURCES[site]) return res.status(400).json({ error: "unknown_site", known: Object.keys(SOURCES) });
 
-  const result = await scanSource(site, String(keyword), String(location), Math.max(1, Number(page) || 1));
+  const result = await scanSource(site, String(keyword), String(location), Math.max(1, Number(page) || 1), !!debug);
 
   // 5-hour refresh window: edge caches successful scrapes; failures are not cached
-  // so a blocked/erroring source can recover on the next request.
+  // so a blocked/erroring source can recover on the next request. Debug requests
+  // bypass the cache so each one shows a live trace.
+  if (debug) {
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json(result);
+  }
   if (result.status === "ok" || result.status === "empty") {
     res.setHeader("Cache-Control", "public, s-maxage=18000, stale-while-revalidate=86400");
   } else {

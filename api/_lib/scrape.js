@@ -21,6 +21,8 @@ export const SOURCES = {
     domain: "bizbuysell.com",
     scope: "bizbuysell.com/business-opportunity",
     detailRe: /bizbuysell\.com\/(?:business-opportunity|business-auction)\//i,
+    pageUrl: (kw, loc, page) =>
+      `https://www.bizbuysell.com/businesses-for-sale/?q=${encodeURIComponent(kw)}${page > 1 ? `&page=${page}` : ""}`,
   },
   businessesforsale: {
     label: "BusinessesForSale.com",
@@ -28,6 +30,8 @@ export const SOURCES = {
     domain: "businessesforsale.com",
     scope: "us.businessesforsale.com",
     detailRe: /businessesforsale\.com\/[^\s"']*\.aspx/i,
+    pageUrl: (kw) =>
+      `https://us.businessesforsale.com/search/businesses-for-sale?Keywords=${encodeURIComponent(kw)}`,
   },
   bizquest: {
     label: "BizQuest",
@@ -35,6 +39,7 @@ export const SOURCES = {
     domain: "bizquest.com",
     scope: "bizquest.com",
     detailRe: /bizquest\.com\/[a-z0-9-]*business[^\s"']*/i,
+    pageUrl: (kw) => `https://www.bizquest.com/businesses-for-sale/?keyword=${encodeURIComponent(kw)}`,
   },
   dealstream: {
     label: "DealStream",
@@ -137,6 +142,26 @@ export async function fetchPage(url, extraHeaders = {}) {
         "accept-language": "en-US,en;q=0.9",
         ...extraHeaders,
       },
+    });
+    const body = await r.text();
+    return { status: r.status, body };
+  } catch (err) {
+    return { status: 0, body: "", error: String(err && err.message ? err.message : err) };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Vercel functions run on datacenter IPs that most sites (and Bing/DDG) refuse.
+// Jina's public Reader fetches the page from its own infrastructure and returns
+// markdown — free and keyless (rate-limited, but our 5h edge cache absorbs that).
+export async function fetchViaJina(url) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 25000);
+  try {
+    const r = await fetch(`https://r.jina.ai/${url}`, {
+      signal: controller.signal,
+      headers: { accept: "text/plain, text/markdown, */*", "user-agent": UA },
     });
     const body = await r.text();
     return { status: r.status, body };
@@ -270,6 +295,35 @@ export function extractFromHtml(html, baseUrl, linkRe, src) {
   return dedupeByUrl(listings);
 }
 
+// ---------- markdown extraction (for pages fetched via Jina Reader) ----------
+
+export function extractFromMarkdown(md, linkRe, src) {
+  const items = [];
+  const linkMd = /\[([^\]]{3,300}?)\]\((https?:\/\/[^)\s]+)\)/g;
+  const matches = [];
+  let m;
+  while ((m = linkMd.exec(md))) matches.push({ text: m[1], url: m[2], index: m.index });
+  for (let i = 0; i < matches.length; i++) {
+    const a = matches[i];
+    let path;
+    try {
+      path = new URL(a.url).pathname;
+    } catch {
+      continue;
+    }
+    if (!(linkRe.test(path) || linkRe.test(a.url))) continue;
+    const name = cleanName(a.text.replace(/!\[[^\]]*\]/g, " "));
+    if (!name) continue;
+    const end = i + 1 < matches.length ? matches[i + 1].index : a.index + 2500;
+    const windowText = md
+      .slice(a.index, Math.min(end, a.index + 2500))
+      .replace(/[\\*_#>|\[\]()]/g, " ")
+      .replace(/\s+/g, " ");
+    items.push(makeListing(src, name, a.url, windowText));
+  }
+  return dedupeByUrl(items);
+}
+
 // ---------- search-index adapters (for bot-walled marketplaces) ----------
 
 function parseBingRss(xml, src) {
@@ -311,28 +365,37 @@ function parseDdgHtml(html, src) {
   return dedupeByUrl(items);
 }
 
-async function scanSearchIndex(src, keyword, location, page) {
+const note = (attempts, via, url, r, found) =>
+  attempts.push({ via, url, httpStatus: r.status, found, sample: (r.body || r.error || "").slice(0, 160) });
+
+async function scanSearchIndex(src, keyword, location, page, attempts) {
   const q = `site:${src.scope} ${keyword} ${location || ""} for sale`.trim();
   const first = page > 1 ? `&first=${(page - 1) * 10 + 1}` : "";
 
-  const bing = await fetchPage(
-    `https://www.bing.com/search?q=${encodeURIComponent(q)}&format=rss&count=15${first}`,
-    { accept: "application/rss+xml,application/xml,text/xml;q=0.9,*/*;q=0.8" }
-  );
+  const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(q)}&format=rss&count=15${first}`;
+  const bing = await fetchPage(bingUrl, { accept: "application/rss+xml,application/xml,text/xml;q=0.9,*/*;q=0.8" });
   if (bing.status === 200 && bing.body.includes("<item>")) {
     const listings = dedupeByUrl(parseBingRss(bing.body, src));
+    note(attempts, "bing-rss", bingUrl, bing, listings.length);
     if (listings.length) return { status: "ok", httpStatus: 200, via: "bing-rss", listings };
-  }
+  } else note(attempts, "bing-rss", bingUrl, bing, 0);
 
-  const ddgQ = encodeURIComponent(q) + (page > 1 ? `&s=${(page - 1) * 10}` : "");
-  const ddg = await fetchPage(`https://html.duckduckgo.com/html/?q=${ddgQ}`);
-  if (ddg.status === 200) {
-    const listings = parseDdgHtml(ddg.body, src);
-    if (listings.length) return { status: "ok", httpStatus: 200, via: "ddg-html", listings };
-    return { status: "empty", httpStatus: 200, via: "ddg-html", listings: [] };
-  }
+  const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}${page > 1 ? `&s=${(page - 1) * 10}` : ""}`;
+  const ddg = await fetchPage(ddgUrl);
+  const ddgListings = ddg.status === 200 ? parseDdgHtml(ddg.body, src) : [];
+  note(attempts, "ddg-html", ddgUrl, ddg, ddgListings.length);
+  if (ddgListings.length) return { status: "ok", httpStatus: 200, via: "ddg-html", listings: ddgListings };
 
-  const httpStatus = ddg.status || bing.status || 0;
+  // Search engines block datacenter IPs — read the marketplace's own search page
+  // through Jina Reader instead.
+  const pageUrl = src.pageUrl(keyword, location, page);
+  const jina = await fetchViaJina(pageUrl);
+  const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.detailRe, src) : [];
+  note(attempts, "jina-reader", pageUrl, jina, jinaListings.length);
+  if (jinaListings.length) return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings };
+  if (jina.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
+
+  const httpStatus = jina.status || ddg.status || bing.status || 0;
   return {
     status: httpStatus === 403 || httpStatus === 429 ? "blocked" : "error",
     httpStatus,
@@ -341,33 +404,45 @@ async function scanSearchIndex(src, keyword, location, page) {
   };
 }
 
-async function scanDirect(src, keyword, location, page) {
+async function scanDirect(src, keyword, location, page, attempts) {
   const url = src.searchUrl(keyword, location, page);
   const r = await fetchPage(url);
-  if (r.status !== 200) {
-    return {
-      status: r.status === 403 || r.status === 429 || r.status === 503 ? "blocked" : "error",
-      httpStatus: r.status,
-      via: "direct",
-      listings: [],
-    };
-  }
-  const listings = extractFromHtml(r.body, url, src.linkRe, src);
-  return { status: listings.length ? "ok" : "empty", httpStatus: 200, via: "direct", listings };
+  const directListings = r.status === 200 ? extractFromHtml(r.body, url, src.linkRe, src) : [];
+  note(attempts, "direct", url, r, directListings.length);
+  if (directListings.length) return { status: "ok", httpStatus: 200, via: "direct", listings: directListings };
+
+  // Blocked, erroring, or a page we couldn't parse — retry through Jina Reader.
+  const jina = await fetchViaJina(url);
+  const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.linkRe, src) : [];
+  note(attempts, "jina-reader", url, jina, jinaListings.length);
+  if (jinaListings.length) return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings };
+  if (jina.status === 200 || r.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
+
+  const httpStatus = jina.status || r.status || 0;
+  return {
+    status: httpStatus === 403 || httpStatus === 429 || httpStatus === 503 ? "blocked" : "error",
+    httpStatus,
+    via: "direct",
+    listings: [],
+  };
 }
 
 // ---------- public entry point ----------
 
-export async function scanSource(siteId, keyword, location = "", page = 1) {
+export async function scanSource(siteId, keyword, location = "", page = 1, debug = false) {
   const src = SOURCES[siteId];
   if (!src) return { site: siteId, label: siteId, status: "unknown_site", httpStatus: 0, listings: [] };
+  const attempts = [];
   try {
     const r =
       src.kind === "direct"
-        ? await scanDirect(src, keyword, location, page)
-        : await scanSearchIndex(src, keyword, location, page);
-    return { site: siteId, label: src.label, ...r };
+        ? await scanDirect(src, keyword, location, page, attempts)
+        : await scanSearchIndex(src, keyword, location, page, attempts);
+    return { site: siteId, label: src.label, ...r, ...(debug ? { attempts } : {}) };
   } catch (err) {
-    return { site: siteId, label: src.label, status: "error", httpStatus: 0, listings: [], detail: String(err) };
+    return {
+      site: siteId, label: src.label, status: "error", httpStatus: 0, listings: [],
+      detail: String(err), ...(debug ? { attempts } : {}),
+    };
   }
 }
