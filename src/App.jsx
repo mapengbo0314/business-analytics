@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 
 // ---------- Design tokens: "Underwriter's ledger" ----------
 const T = {
@@ -11,7 +11,19 @@ const T = {
 };
 
 const STORAGE_KEY = "dealflow-state-v1";
-const SITES = ["businessesforsale.com", "bizbuysell.com", "bizquest.com"];
+const SITES_KEY = "dealflow-sites-v1";
+const POOL_KEY = "dealflow-pool-v2";
+// Mirrors api/_lib/scrape.js — the big marketplaces are read via public search
+// indexes (their own pages block server-side bots); the rest are scraped directly.
+const SOURCES = [
+  { id: "bizbuysell", label: "BizBuySell" },
+  { id: "businessesforsale", label: "BusinessesForSale.com" },
+  { id: "bizquest", label: "BizQuest" },
+  { id: "dealstream", label: "DealStream" },
+  { id: "businessbroker", label: "BusinessBroker.net" },
+  { id: "synergybb", label: "Synergy Business Brokers" },
+];
+const REFRESH_MS = 5 * 60 * 60 * 1000; // 5 hours — matches the server-side cache & cron
 const TODAY = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
 // ---------- Seed listings — extracted and validated live, Jul 6, 2026 ----------
@@ -113,7 +125,7 @@ function VerifyBadge({ d }) {
   const map = {
     live: { bg: T.greenSoft, fg: T.green, label: `✓ Page verified live ${d.verifiedOn}` },
     partial: { bg: T.brassSoft, fg: T.brass, label: `⚠ Partially verified ${d.verifiedOn} — detail page blocks bots` },
-    search: { bg: T.brassSoft, fg: T.brass, label: "◌ From live search — not yet validated, click through to verify" },
+    search: { bg: T.brassSoft, fg: T.brass, label: "◌ Scraped from source — click through to verify" },
   };
   const s = map[d.verify] || map.search;
   return (
@@ -259,11 +271,37 @@ export default function App() {
 
   const [keyword, setKeyword] = useState("HVAC");
   const [loc, setLoc] = useState("Texas");
-  const [pool, setPool] = useState(SEED_DEALS);
+  const [pool, setPool] = useState(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(POOL_KEY));
+      if (cached && Array.isArray(cached.deals) && cached.deals.length) return cached.deals;
+    } catch (e) { /* no cache — fall through to seeds */ }
+    return SEED_DEALS;
+  });
+  const [lastScanAt, setLastScanAt] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(POOL_KEY))?.at || null; } catch (e) { return null; }
+  });
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState(null);
   const [siteStatus, setSiteStatus] = useState(null);
   const [hasScanned, setHasScanned] = useState(false);
+  const [page, setPage] = useState(1);
+  const [enabled, setEnabled] = useState(() => {
+    try {
+      const raw = localStorage.getItem(SITES_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        return Object.fromEntries(SOURCES.map((s) => [s.id, saved[s.id] !== false]));
+      }
+    } catch (e) { /* fresh browser */ }
+    return Object.fromEntries(SOURCES.map((s) => [s.id, true]));
+  });
+  const toggleSite = (id) =>
+    setEnabled((prev) => {
+      const next = { ...prev, [id]: !prev[id] };
+      try { localStorage.setItem(SITES_KEY, JSON.stringify(next)); } catch (e) { /* private mode */ }
+      return next;
+    });
 
   const isSaved = (d) => !!store.saved[canon(d)];
   const isSeen = (d) => !!store.seen[canon(d)];
@@ -275,15 +313,15 @@ export default function App() {
     return out;
   };
 
-  const scanSite = async (site, kw, location, excludeUrls) => {
-    const r = await fetch("/api/scan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ site, keyword: kw, location, exclude: excludeUrls }),
-    });
+  const scanSite = async (siteId, kw, location, pageNum) => {
+    const params = new URLSearchParams({ site: siteId, keyword: kw });
+    if (location) params.set("location", location);
+    if (pageNum > 1) params.set("page", String(pageNum));
+    const r = await fetch(`/api/scan?${params.toString()}`);
     const data = await r.json();
-    if (r.status === 501) throw Object.assign(new Error(data.message), { noKey: true });
     if (!r.ok) throw new Error(data.detail || data.error || "scan failed");
+    if (data.status !== "ok" && data.status !== "empty")
+      throw Object.assign(new Error(data.status), { siteState: data.status });
     return (data.listings || []).map((p) => {
       const missing = [];
       if (p.asking == null) missing.push("Asking price");
@@ -294,7 +332,7 @@ export default function App() {
       return {
         id: null,
         name: p.name || "Untitled listing",
-        source: p.source || site, broker: p.broker || null,
+        source: p.source || siteId, broker: p.broker || null,
         location: p.location || "Not stated",
         asking: p.asking ?? null, sde: p.sde ?? null,
         revenueT12: p.revenueT12 ?? null, established: p.established ?? null,
@@ -307,24 +345,33 @@ export default function App() {
 
   const runScan = async (append = false) => {
     if (!keyword.trim() || scanning) return;
-    setScanning(true); setScanError(null); setSiteStatus(null);
-    const excludeUrls = append ? pool.map((d) => d.listingUrl).filter(Boolean) : [];
+    const active = SOURCES.filter((s) => enabled[s.id]);
+    if (!active.length) { setScanError("Enable at least one source site below."); return; }
+    setScanning(true); setScanError(null);
+    const nextPage = append ? page + 1 : 1;
     try {
       const settled = await Promise.allSettled(
-        SITES.map((site) => scanSite(site, keyword.trim(), loc.trim(), excludeUrls))
+        active.map((s) => scanSite(s.id, keyword.trim(), loc.trim(), nextPage))
       );
-      const noKey = settled.find((r) => r.status === "rejected" && r.reason?.noKey);
-      if (noKey) { setScanError(noKey.reason.message); return; }
       const batch = [];
       const status = {};
       settled.forEach((r, i) => {
-        if (r.status === "fulfilled") { batch.push(...r.value); status[SITES[i]] = r.value.length; }
-        else { status[SITES[i]] = "error"; }
+        if (r.status === "fulfilled") { batch.push(...r.value); status[active[i].id] = r.value.length; }
+        else { status[active[i].id] = r.reason?.siteState || "error"; }
       });
       setSiteStatus(status);
-      setPool((prev) => dedupe(append ? [...prev, ...batch] : [...batch]));
+      setPage(nextPage);
       setHasScanned(true);
-      if (batch.length === 0 && !append) setScanError("No listings returned — try a broader keyword or drop the location.");
+      const at = Date.now();
+      setLastScanAt(at);
+      setPool((prev) => {
+        // keep what we have if a refresh comes back empty (sources may be flaky)
+        const merged = batch.length ? dedupe(append ? [...prev, ...batch] : batch) : prev;
+        try { localStorage.setItem(POOL_KEY, JSON.stringify({ at, deals: merged })); } catch (e) { /* private mode */ }
+        return merged;
+      });
+      if (batch.length === 0 && !append)
+        setScanError("No listings returned this round — check the per-source status below; blocked sources can be unticked.");
     } catch (err) {
       console.error(err);
       setScanError("Scan failed — try again in a moment.");
@@ -332,6 +379,17 @@ export default function App() {
       setScanning(false);
     }
   };
+
+  // Auto-refresh: scan on load when the cached pool is older than 5 hours, then
+  // re-scan every 5 hours while the tab stays open (matches server cache + cron).
+  const scanRef = useRef(runScan);
+  scanRef.current = runScan;
+  useEffect(() => {
+    if (!lastScanAt || Date.now() - lastScanAt > REFRESH_MS) scanRef.current(false);
+    const iv = setInterval(() => scanRef.current(false), REFRESH_MS);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const scored = useMemo(
     () => dedupe(pool).map((d) => ({ ...d, ...scoreDeal(d, criteria) })),
@@ -420,15 +478,18 @@ export default function App() {
       <header className="px-6 pt-6 pb-4" style={{ borderBottom: `1px solid ${T.line}` }}>
         <div className="max-w-5xl mx-auto flex flex-wrap items-end justify-between gap-3">
           <div>
-            <div style={{ fontFamily: T.mono, fontSize: 11, letterSpacing: 2, color: T.green }}>MARKET SCAN · {TODAY.toUpperCase()} · 3 SITES</div>
+            <div style={{ fontFamily: T.mono, fontSize: 11, letterSpacing: 2, color: T.green }}>MARKET SCRAPE · {TODAY.toUpperCase()} · {SOURCES.length} SOURCES · REFRESHES EVERY 5H</div>
             <h1 style={{ fontFamily: T.display, fontSize: 30, lineHeight: 1.1, marginTop: 6 }}>Acquisition screen</h1>
           </div>
           <div className="text-right">
             <div style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 600 }}>
               {visible.length} above fit {criteria.minScore} · {savedList.length} saved · {passedList.length} passed
             </div>
-            <div style={{ fontSize: 12, color: T.inkSoft }}>Daily digest → pengbo.dev@gmail.com · 7:00 AM CT</div>
-            <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.green, marginTop: 2 }}>● Extract-only mode · dedup by listing URL</div>
+            <div style={{ fontSize: 12, color: T.inkSoft }}>Email digest every 5 hours → pengbo.dev@gmail.com</div>
+            <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.green, marginTop: 2 }}>
+              ● Direct scrape — no AI · dedup by listing URL
+              {lastScanAt ? ` · last refresh ${new Date(lastScanAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}` : ""}
+            </div>
           </div>
         </div>
       </header>
@@ -437,7 +498,7 @@ export default function App() {
         <section className="flex flex-col gap-4">
           <div className="rounded-lg p-4" style={{ background: T.surface, border: `1px solid ${T.line}` }}>
             <div style={{ fontFamily: T.mono, fontSize: 11, letterSpacing: 2, color: T.green, marginBottom: 8 }}>
-              SCAN — BUSINESSESFORSALE · BIZBUYSELL · BIZQUEST
+              SCRAPE — {SOURCES.filter((s) => enabled[s.id]).length} OF {SOURCES.length} SOURCES ENABLED · AUTO-REFRESH EVERY 5 HOURS
             </div>
             <div className="flex flex-col sm:flex-row gap-2">
               <input value={keyword} onChange={(e) => setKeyword(e.target.value)}
@@ -453,22 +514,40 @@ export default function App() {
               <button onClick={() => runScan(false)} disabled={scanning || !keyword.trim()}
                 className="px-4 py-2 rounded-md text-sm font-semibold"
                 style={{ background: scanning || !keyword.trim() ? T.line : T.green, color: scanning || !keyword.trim() ? T.inkSoft : "#fff" }}>
-                {scanning ? "Scanning…" : "Scan all 3 sites"}
+                {scanning ? "Scraping…" : "Refresh now"}
               </button>
             </div>
+
+            <div className="flex flex-wrap gap-1.5 mt-3">
+              {SOURCES.map((s) => {
+                const on = enabled[s.id];
+                const st = siteStatus ? siteStatus[s.id] : undefined;
+                const stText =
+                  st === undefined || !on ? null
+                    : typeof st === "number" ? `${st} found`
+                    : st === "blocked" ? "blocked"
+                    : "error";
+                const stColor = typeof st === "number" ? (st > 0 ? T.green : T.brass) : T.clay;
+                return (
+                  <button key={s.id} onClick={() => toggleSite(s.id)}
+                    title={on ? "Click to exclude this source from scans" : "Click to include this source"}
+                    style={{
+                      fontFamily: T.mono, fontSize: 11, padding: "3px 10px", borderRadius: 999,
+                      border: `1px solid ${on ? T.green : T.line}`,
+                      background: on ? T.greenSoft : "transparent",
+                      color: on ? T.green : T.inkSoft,
+                    }}>
+                    {on ? "☑" : "☐"} {s.label}
+                    {stText && <span style={{ color: stColor }}> · {stText}</span>}
+                  </button>
+                );
+              })}
+            </div>
+
             {scanning && (
               <div className="flex items-center gap-2 mt-3" style={{ fontFamily: T.mono, fontSize: 12, color: T.green }}>
                 <span style={{ width: 8, height: 8, borderRadius: 99, background: T.green, animation: "pulse-dot 1s infinite" }} />
-                Running 3 parallel site scans for "{keyword.trim()}"…
-              </div>
-            )}
-            {siteStatus && !scanning && (
-              <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3" style={{ fontFamily: T.mono, fontSize: 11, color: T.inkSoft }}>
-                {SITES.map((s) => (
-                  <span key={s}>
-                    {s}: {siteStatus[s] === "error" ? <span style={{ color: T.clay }}>scan error</span> : `${siteStatus[s]} found`}
-                  </span>
-                ))}
+                Scraping {SOURCES.filter((s) => enabled[s.id]).length} sources in parallel for "{keyword.trim()}"…
               </div>
             )}
             {scanError && (
@@ -512,8 +591,8 @@ export default function App() {
                   </div>
                   <p style={{ fontSize: 12.5, color: T.inkSoft, marginTop: 4 }}>
                     {hasScanned || belowCut > 0
-                      ? "Try Load more, broaden the keyword, or lower the Min FIT filter."
-                      : "Enter a keyword above and scan BusinessesForSale, BizBuySell and BizQuest in parallel."}
+                      ? "Try Load more, broaden the keyword, lower the Min FIT filter, or check which sources are responding above."
+                      : "Enter a keyword above and scrape all enabled sources in parallel — it also refreshes itself every 5 hours."}
                   </p>
                 </div>
               ) : (
@@ -524,7 +603,7 @@ export default function App() {
                 <button onClick={() => runScan(true)} disabled={scanning}
                   className="px-4 py-2 rounded-md text-sm font-semibold self-center"
                   style={{ border: `1px solid ${T.green}`, color: T.green, background: "transparent" }}>
-                  {scanning ? "Scanning…" : "Load more — scan again, excluding what's already here"}
+                  {scanning ? "Scraping…" : "Load more — pull the next page from each source"}
                 </button>
               )}
 
@@ -582,8 +661,10 @@ export default function App() {
 
       <footer className="max-w-5xl mx-auto px-6 pb-8">
         <p style={{ fontSize: 11, color: T.inkSoft }}>
-          Scans run three parallel live searches (one per site); "Load more" excludes URLs already collected.
-          Only listings above the Min FIT cutoff are shown; unstated figures count as failed checks, never
+          Listings are scraped directly from the enabled sources (no AI involved) and auto-refresh every
+          5 hours; big marketplaces that block bots are read via public search indexes instead. The chips
+          above show which sources responded on the last pass — untick any that report "blocked". Only
+          listings above the Min FIT cutoff are shown; unstated figures count as failed checks, never
           estimates. Saves, passes and drafts persist in this browser, keyed by listing URL.
         </p>
       </footer>
