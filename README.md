@@ -23,10 +23,10 @@ Three mechanisms, so it works on any Vercel plan:
    site+keyword+location is re-scraped at most once per 5 hours.
 2. The frontend auto-scans on load when its cached results are older than 5 hours,
    and re-scans every 5 hours while the tab is open.
-3. `vercel.json` schedules the email digest cron at `0 */5 * * *`.
-   ⚠️ **Vercel Hobby plan only allows daily crons** — if your deploy fails with
-   "Hobby accounts are limited to daily cron jobs", either upgrade to Pro or set the
-   schedule back to e.g. `0 12 * * *` (the in-app 5-hour refresh still works either way).
+3. `vercel.json` schedules the email digest cron. It's set to `0 12 * * *` (daily)
+   because **Vercel's Hobby plan only allows daily crons** — on a Pro plan you can
+   change it to `0 */5 * * *` for a 5-hourly digest. Listings in the app refresh
+   every 5 hours either way via mechanisms 1 and 2.
 
 ## Deploy
 
