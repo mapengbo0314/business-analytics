@@ -336,8 +336,28 @@ function DocsSection({ d, docsEnabled, onFiles }) {
   );
 }
 
-function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, onDD }) {
+function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, onDD, analyzeEnabled, onReport }) {
   const [copied, setCopied] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeErr, setAnalyzeErr] = useState(null);
+
+  const runAnalysis = async () => {
+    setAnalyzing(true); setAnalyzeErr(null);
+    try {
+      const r = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deal: d, criteria }),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error || !data.report) throw new Error(data.message || data.detail || data.error || "analysis failed");
+      onReport(data);
+    } catch (err) {
+      setAnalyzeErr(`Analysis failed: ${err.message}`);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
   const stage = d.stage || "watching";
   const daysIn = d.stageAt ? Math.floor((Date.now() - d.stageAt) / 86400000) : null;
   const stageColor = (id) =>
@@ -377,6 +397,26 @@ function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, on
         onBlur={(e) => e.target.value !== (d.notes || "") && onNotes(e.target.value)}
         className="w-full rounded-md p-2 mt-2"
         style={{ fontFamily: T.body, fontSize: 12, border: `1px solid ${T.line}`, color: T.ink, background: T.bg, resize: "vertical" }} />
+      {analyzeEnabled && (
+        <div className="mt-2">
+          <button onClick={runAnalysis} disabled={analyzing}
+            className="px-3 py-1.5 rounded-md text-sm font-semibold"
+            style={{ background: analyzing ? T.line : T.green, color: analyzing ? T.inkSoft : "#fff" }}>
+            {analyzing ? "Analyzing with Claude — this can take a minute…" : d.ddReport ? "▶ Re-analyze with Claude" : "▶ Analyze with Claude"}
+          </button>
+          {analyzeErr && <div style={{ color: T.clay, fontSize: 11.5, marginTop: 4 }}>{analyzeErr}</div>}
+        </div>
+      )}
+      {d.ddReport && (
+        <details className="mt-2 rounded-md" style={{ border: `1px solid ${T.line}`, background: T.bg }}>
+          <summary className="px-3 py-2" style={{ fontFamily: T.mono, fontSize: 11.5, color: T.green, cursor: "pointer" }}>
+            📊 Claude's analysis{d.ddReportAt ? ` — ${new Date(d.ddReportAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : ""} (click to expand)
+          </summary>
+          <pre className="px-3 pb-3" style={{ whiteSpace: "pre-wrap", fontFamily: T.body, fontSize: 12.5, lineHeight: 1.55, color: T.ink, margin: 0 }}>
+            {d.ddReport}
+          </pre>
+        </details>
+      )}
       <div className="flex flex-wrap items-center gap-2 mt-1">
         <button
           onClick={async () => {
@@ -418,7 +458,7 @@ function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, on
   );
 }
 
-function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRestore, inSeenList, pipeline, onStage, onNotes, docsEnabled, onFiles, onDD }) {
+function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRestore, inSeenList, pipeline, onStage, onNotes, docsEnabled, onFiles, onDD, analyzeEnabled, onReport }) {
   return (
     <article className="rounded-lg p-4" style={{ background: T.surface, border: saved ? `1.5px solid ${T.green}` : `1px solid ${T.line}` }}>
       <div className="flex gap-4">
@@ -487,7 +527,7 @@ function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRes
             </div>
           </div>
 
-          {pipeline && <PipelinePanel d={d} criteria={criteria} onStage={onStage} onNotes={onNotes} docsEnabled={docsEnabled} onFiles={onFiles} onDD={onDD} />}
+          {pipeline && <PipelinePanel d={d} criteria={criteria} onStage={onStage} onNotes={onNotes} docsEnabled={docsEnabled} onFiles={onFiles} onDD={onDD} analyzeEnabled={analyzeEnabled} onReport={onReport} />}
 
           <div className="flex flex-wrap gap-2 mt-4">
             {sentFlag ? (
@@ -571,13 +611,15 @@ export default function App() {
       return next;
     });
 
-  // Document uploads need a Vercel Blob store connected (BLOB_READ_WRITE_TOKEN).
+  // Optional integrations, each unlocked by a Vercel env var:
+  // uploads (Blob store), direct Gmail inquiries, in-app Claude analysis.
   const [docsEnabled, setDocsEnabled] = useState(false);
+  const [inquiryFrom, setInquiryFrom] = useState(null);
+  const [analyzeEnabled, setAnalyzeEnabled] = useState(false);
   useEffect(() => {
-    fetch("/api/upload")
-      .then((r) => r.json())
-      .then((data) => setDocsEnabled(!!data.enabled))
-      .catch(() => {});
+    fetch("/api/upload").then((r) => r.json()).then((d) => setDocsEnabled(!!d.enabled)).catch(() => {});
+    fetch("/api/inquire").then((r) => r.json()).then((d) => setInquiryFrom(d.enabled ? d.from : null)).catch(() => {});
+    fetch("/api/analyze").then((r) => r.json()).then((d) => setAnalyzeEnabled(!!d.enabled)).catch(() => {});
   }, []);
 
   // Shared stars: when Upstash is configured server-side, /api/saved is the
@@ -764,12 +806,46 @@ export default function App() {
     delete next.seen[canon(d)];
     persist(next);
   };
-  const openEmail = (d) => { setEmailDeal(d); setDraft(draftEmail(d)); };
+  const [emailTo, setEmailTo] = useState("");
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailErr, setEmailErr] = useState(null);
+  const openEmail = (d) => { setEmailDeal(d); setDraft(draftEmail(d)); setEmailTo(""); setEmailErr(null); };
+
+  const afterInquirySent = (d) => {
+    persist({ ...store, sent: { ...store.sent, [canon(d)]: TODAY } });
+    const saved = store.saved[canon(d)];
+    const rank = (id) => STAGES.findIndex((s) => s.id === id);
+    if (saved && rank(saved.stage || "watching") < rank("inquired")) {
+      updateSaved(canon(d), { stage: "inquired", stageAt: Date.now() });
+    }
+    setEmailDeal(null);
+  };
   const sendViaMailApp = () => {
     const subject = `Buyer inquiry — ${emailDeal.name}${emailDeal.id ? ` (Listing ${emailDeal.id})` : ""}`;
-    window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(draft)}`;
-    persist({ ...store, sent: { ...store.sent, [canon(emailDeal)]: TODAY } });
-    setEmailDeal(null);
+    window.location.href = `mailto:${emailTo.trim()}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(draft)}`;
+    afterInquirySent(emailDeal);
+  };
+  const sendViaGmail = async () => {
+    if (!emailTo.trim()) { setEmailErr("Enter the broker's email address first."); return; }
+    setEmailSending(true); setEmailErr(null);
+    try {
+      const r = await fetch("/api/inquire", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: emailTo.trim(),
+          subject: `Buyer inquiry — ${emailDeal.name}${emailDeal.id ? ` (Listing ${emailDeal.id})` : ""}`,
+          body: draft,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data.detail || data.error || "send failed");
+      afterInquirySent(emailDeal);
+    } catch (err) {
+      setEmailErr(`Send failed: ${err.message}`);
+    } finally {
+      setEmailSending(false);
+    }
   };
 
   const set = (k, v) => setCriteria((c) => ({ ...c, [k]: v }));
@@ -811,7 +887,18 @@ export default function App() {
       updateSaved(canon(d), patch);
     },
     onDD: () => updateSaved(canon(d), { ddAt: Date.now(), ddCount: (d.ddCount || 0) + 1 }),
+    onReport: (data) =>
+      updateSaved(canon(d), {
+        ddReport: data.report,
+        ddReportAt: Date.now(),
+        ddAt: Date.now(),
+        ddCount: (d.ddCount || 0) + 1,
+        ...(STAGES.findIndex((s) => s.id === (d.stage || "watching")) < STAGES.findIndex((s) => s.id === "dd")
+          ? { stage: "dd", stageAt: Date.now() }
+          : {}),
+      }),
     docsEnabled,
+    analyzeEnabled,
   });
 
   const tabBtn = (id, label) => (
@@ -1005,17 +1092,31 @@ export default function App() {
           role="dialog" aria-modal="true" aria-label="Broker email draft">
           <div className="w-full max-w-lg rounded-lg p-5" style={{ background: T.surface }}>
             <div style={{ fontFamily: T.mono, fontSize: 11, letterSpacing: 2, color: T.green }}>
-              DRAFT — OPENS IN YOUR EMAIL APP · PASTE THE BROKER'S ADDRESS FROM THE LISTING
+              {inquiryFrom
+                ? `INQUIRY — SENDS FROM ${inquiryFrom.toUpperCase()} · PASTE THE BROKER'S ADDRESS FROM THE LISTING`
+                : "DRAFT — OPENS IN YOUR EMAIL APP · PASTE THE BROKER'S ADDRESS FROM THE LISTING"}
             </div>
             <h3 style={{ fontFamily: T.display, fontSize: 18, margin: "6px 0 10px" }}>{emailDeal.name}</h3>
-            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={14}
+            <input value={emailTo} onChange={(e) => setEmailTo(e.target.value)}
+              placeholder="Broker's email — from the listing page or their reply"
+              className="w-full rounded-md px-3 py-2 mb-2"
+              style={{ border: `1px solid ${T.line}`, fontSize: 13, fontFamily: T.mono, color: T.ink, background: T.bg }} />
+            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={13}
               className="w-full rounded-md p-3"
               style={{ fontFamily: T.mono, fontSize: 12, lineHeight: 1.55, border: `1px solid ${T.line}`, color: T.ink, resize: "vertical" }} />
+            {emailErr && <div style={{ color: T.clay, fontSize: 12, marginTop: 6 }}>{emailErr}</div>}
             <div className="flex justify-end gap-2 mt-3">
               <button onClick={() => setEmailDeal(null)} className="px-3 py-1.5 rounded-md text-sm"
                 style={{ border: `1px solid ${T.line}`, color: T.inkSoft, background: "transparent" }}>Cancel</button>
-              <button onClick={sendViaMailApp} className="px-4 py-1.5 rounded-md text-sm font-semibold"
-                style={{ background: T.green, color: "#fff" }}>Open in email app</button>
+              <button onClick={sendViaMailApp} className="px-3 py-1.5 rounded-md text-sm"
+                style={{ border: `1px solid ${T.line}`, color: T.inkSoft, background: "transparent" }}>Open in email app</button>
+              {inquiryFrom && (
+                <button onClick={sendViaGmail} disabled={emailSending}
+                  className="px-4 py-1.5 rounded-md text-sm font-semibold"
+                  style={{ background: emailSending ? T.line : T.green, color: emailSending ? T.inkSoft : "#fff" }}>
+                  {emailSending ? "Sending…" : `Send from ${inquiryFrom}`}
+                </button>
+              )}
             </div>
           </div>
         </div>

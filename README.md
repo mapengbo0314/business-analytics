@@ -54,7 +54,24 @@ Three mechanisms, so it works on any Vercel plan:
    to Blob storage, and the links attach to the deal so everyone sees the same
    document stack. Blob URLs are public-but-unguessable — fine for a small
    trusted group, but don't post them anywhere.
-5. **(Optional) Protect the cron endpoint.** Add `CRON_SECRET` (any random string);
+5. **(Optional, $0) Send inquiries from your own Gmail.** Enable 2-Step
+   Verification on the Google account, create an **App Password**
+   (myaccount.google.com → Security → 2-Step Verification → App passwords),
+   then add env vars:
+   - `GMAIL_USER` — e.g. bizbo0314@gmail.com
+   - `GMAIL_APP_PASSWORD` — the 16-character app password
+   The inquiry dialog gains a "Send from …" button (SMTP, ~500 emails/day free)
+   and sending auto-advances the deal to "Inquired". Without these it falls
+   back to opening your email app.
+6. **(Optional, pay-per-use) In-app Claude analysis.** Add `ANTHROPIC_API_KEY`
+   (console.anthropic.com) and each pipeline deal gets an **"Analyze with
+   Claude"** button: the deal's uploaded documents (PDF/CSV/TXT/images) are
+   sent to Claude server-side and the structured DD report is saved onto the
+   deal — shared, like everything else. Typical cost is cents to ~$1 per
+   analysis (model: `claude-opus-4-8`; override with `ANALYZE_MODEL`).
+   Scanning never uses this key — only analysis does. Without the key, the
+   copy-prompt buttons remain the manual fallback.
+7. **(Optional) Protect the cron endpoint.** Add `CRON_SECRET` (any random string);
    Vercel automatically sends it with cron invocations.
 
 ## Local development
