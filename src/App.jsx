@@ -240,6 +240,25 @@ Pengbo
 pengbo.dev@gmail.com`;
 }
 
+// Re-ask Claude after the first analysis: new docs / notes → what changed?
+function followUpPrompt(d, c) {
+  const newDocs = (d.files || []).filter((f) => f.at && d.ddAt && f.at > d.ddAt).map((f) => f.name);
+  const allDocs = (d.files || []).map((f) => f.name);
+  return `Follow-up on the acquisition analysis you previously did for "${d.name}" (${d.location}) — asking ${money(d.asking)}, source listing: ${d.listingUrl}.
+
+Since the last analysis:
+${newDocs.length ? `- NEW documents attached to this message: ${newDocs.join(", ")}` : "- No new documents — this is a re-examination with updated context."}
+${allDocs.length ? `- Full document set on file: ${allDocs.join(", ")}` : ""}
+${d.notes ? `- My current notes / findings: ${d.notes}` : ""}
+
+Please:
+1. Re-run whichever parts of the analysis the new material affects (SDE verification, revenue quality, balance sheet, risk register).
+2. State explicitly what CHANGED versus your previous verdict, and why.
+3. Update the defensible offer range if warranted.
+4. Refresh the open-questions list for the seller — drop what's been answered, add what the new material raises.
+5. Final call: proceed / proceed with conditions / walk away.`;
+}
+
 const fmtSize = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
 
 function DocsSection({ d, docsEnabled, onFiles }) {
@@ -317,8 +336,8 @@ function DocsSection({ d, docsEnabled, onFiles }) {
   );
 }
 
-function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles }) {
-  const [copied, setCopied] = useState(false);
+function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, onDD }) {
+  const [copied, setCopied] = useState(null);
   const stage = d.stage || "watching";
   const daysIn = d.stageAt ? Math.floor((Date.now() - d.stageAt) / 86400000) : null;
   const stageColor = (id) =>
@@ -347,28 +366,59 @@ function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles }) 
           );
         })}
       </div>
+      {stage === "dd" && !(d.files || []).length && (
+        <div style={{ color: T.clay, fontSize: 11.5, marginTop: 6 }}>
+          ⚠ No broker docs uploaded yet — add the financials below so the due-diligence prompt has something to analyze.
+        </div>
+      )}
       <DocsSection d={d} docsEnabled={docsEnabled} onFiles={onFiles} />
       <textarea key={canon(d)} defaultValue={d.notes || ""} rows={2}
         placeholder="Shared notes — broker contact, docs received, DD findings, red flags…"
         onBlur={(e) => e.target.value !== (d.notes || "") && onNotes(e.target.value)}
         className="w-full rounded-md p-2 mt-2"
         style={{ fontFamily: T.body, fontSize: 12, border: `1px solid ${T.line}`, color: T.ink, background: T.bg, resize: "vertical" }} />
-      <button
-        onClick={async () => {
-          if (await copyText(ddPrompt(d, criteria))) {
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2500);
-          }
-        }}
-        className="px-3 py-1.5 rounded-md text-sm mt-1"
-        style={{ border: `1px solid ${T.brass}`, color: copied ? T.green : T.brass, background: "transparent", fontWeight: 600 }}>
-        {copied ? "✓ Copied — paste into claude.ai with the financials attached" : "⧉ Copy due-diligence prompt for Claude"}
-      </button>
+      <div className="flex flex-wrap items-center gap-2 mt-1">
+        <button
+          onClick={async () => {
+            const text = ddPrompt(d, criteria); // build before onDD stamps ddAt
+            if (await copyText(text)) {
+              onDD();
+              setCopied("dd");
+              setTimeout(() => setCopied(null), 3000);
+            }
+          }}
+          className="px-3 py-1.5 rounded-md text-sm"
+          style={{ border: `1px solid ${T.brass}`, color: copied === "dd" ? T.green : T.brass, background: "transparent", fontWeight: 600 }}>
+          {copied === "dd"
+            ? "✓ Copied — paste into claude.ai with the docs attached"
+            : d.ddAt ? "⧉ Copy full DD prompt again" : "⧉ Copy due-diligence prompt for Claude"}
+        </button>
+        {d.ddAt && (
+          <button
+            onClick={async () => {
+              const text = followUpPrompt(d, criteria); // uses previous ddAt to spot new docs
+              if (await copyText(text)) {
+                onDD();
+                setCopied("fu");
+                setTimeout(() => setCopied(null), 3000);
+              }
+            }}
+            className="px-3 py-1.5 rounded-md text-sm"
+            style={{ border: `1px solid ${T.green}`, color: copied === "fu" ? T.green : T.green, background: copied === "fu" ? T.greenSoft : "transparent", fontWeight: 600 }}>
+            {copied === "fu" ? "✓ Copied follow-up" : "⟳ Re-ask Claude — follow-up prompt"}
+          </button>
+        )}
+        {d.ddAt && (
+          <span style={{ fontFamily: T.mono, fontSize: 10.5, color: T.inkSoft }}>
+            analyzed {d.ddCount || 1}× · last {new Date(d.ddAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
 
-function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRestore, inSeenList, pipeline, onStage, onNotes, docsEnabled, onFiles }) {
+function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRestore, inSeenList, pipeline, onStage, onNotes, docsEnabled, onFiles, onDD }) {
   return (
     <article className="rounded-lg p-4" style={{ background: T.surface, border: saved ? `1.5px solid ${T.green}` : `1px solid ${T.line}` }}>
       <div className="flex gap-4">
@@ -437,7 +487,7 @@ function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRes
             </div>
           </div>
 
-          {pipeline && <PipelinePanel d={d} criteria={criteria} onStage={onStage} onNotes={onNotes} docsEnabled={docsEnabled} onFiles={onFiles} />}
+          {pipeline && <PipelinePanel d={d} criteria={criteria} onStage={onStage} onNotes={onNotes} docsEnabled={docsEnabled} onFiles={onFiles} onDD={onDD} />}
 
           <div className="flex flex-wrap gap-2 mt-4">
             {sentFlag ? (
@@ -587,7 +637,7 @@ export default function App() {
   };
 
   const runScan = async (append = false) => {
-    if (!keyword.trim() || scanning) return;
+    if (scanning) return; // empty keyword is fine — browses everything the sources list
     const active = SOURCES.filter((s) => enabled[s.id]);
     if (!active.length) { setScanError("Enable at least one source site below."); return; }
     setScanning(true); setScanError(null);
@@ -750,7 +800,17 @@ export default function App() {
     pipeline: !!opts.pipeline,
     onStage: (stage) => updateSaved(canon(d), { stage, stageAt: Date.now() }),
     onNotes: (notes) => updateSaved(canon(d), { notes }),
-    onFiles: (files) => updateSaved(canon(d), { files }),
+    onFiles: (files) => {
+      // First docs arriving naturally advances the deal to "Docs received".
+      const rank = (id) => STAGES.findIndex((s) => s.id === id);
+      const patch = { files };
+      if (files.length > (d.files || []).length && rank(d.stage || "watching") < rank("docs")) {
+        patch.stage = "docs";
+        patch.stageAt = Date.now();
+      }
+      updateSaved(canon(d), patch);
+    },
+    onDD: () => updateSaved(canon(d), { ddAt: Date.now(), ddCount: (d.ddCount || 0) + 1 }),
     docsEnabled,
   });
 
@@ -802,7 +862,7 @@ export default function App() {
             <div className="flex flex-col sm:flex-row gap-2">
               <input value={keyword} onChange={(e) => setKeyword(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && runScan(false)}
-                placeholder="Business type or keyword — laundromat, landscaping, SaaS…"
+                placeholder="Keyword — HVAC, laundromat, SaaS… leave empty to pull everything"
                 className="flex-1 rounded-md px-3 py-2"
                 style={{ border: `1px solid ${T.line}`, fontSize: 13, fontFamily: T.body, color: T.ink, background: T.bg }} />
               <input value={loc} onChange={(e) => setLoc(e.target.value)}
@@ -810,9 +870,9 @@ export default function App() {
                 placeholder="Location (optional)"
                 className="sm:w-44 rounded-md px-3 py-2"
                 style={{ border: `1px solid ${T.line}`, fontSize: 13, fontFamily: T.body, color: T.ink, background: T.bg }} />
-              <button onClick={() => runScan(false)} disabled={scanning || !keyword.trim()}
+              <button onClick={() => runScan(false)} disabled={scanning}
                 className="px-4 py-2 rounded-md text-sm font-semibold"
-                style={{ background: scanning || !keyword.trim() ? T.line : T.green, color: scanning || !keyword.trim() ? T.inkSoft : "#fff" }}>
+                style={{ background: scanning ? T.line : T.green, color: scanning ? T.inkSoft : "#fff" }}>
                 {scanning ? "Scraping…" : "Refresh now"}
               </button>
             </div>
@@ -846,7 +906,7 @@ export default function App() {
             {scanning && (
               <div className="flex items-center gap-2 mt-3" style={{ fontFamily: T.mono, fontSize: 12, color: T.green }}>
                 <span style={{ width: 8, height: 8, borderRadius: 99, background: T.green, animation: "pulse-dot 1s infinite" }} />
-                Scraping {SOURCES.filter((s) => enabled[s.id]).length} sources in parallel for "{keyword.trim()}"…
+                Scraping {SOURCES.filter((s) => enabled[s.id]).length} sources in parallel for {keyword.trim() ? `"${keyword.trim()}"` : "all listings"}…
               </div>
             )}
             {scanError && (

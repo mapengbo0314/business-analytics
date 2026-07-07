@@ -22,7 +22,9 @@ export const SOURCES = {
     scope: "bizbuysell.com/business-opportunity",
     detailRe: /bizbuysell\.com\/(?:business-opportunity|business-auction)\//i,
     pageUrl: (kw, loc, page) =>
-      `https://www.bizbuysell.com/businesses-for-sale/?q=${encodeURIComponent(kw)}${page > 1 ? `&page=${page}` : ""}`,
+      kw
+        ? `https://www.bizbuysell.com/businesses-for-sale/?q=${encodeURIComponent(kw)}${page > 1 ? `&page=${page}` : ""}`
+        : `https://www.bizbuysell.com/businesses-for-sale/${page > 1 ? `?page=${page}` : ""}`,
   },
   businessesforsale: {
     label: "BusinessesForSale.com",
@@ -45,24 +47,29 @@ export const SOURCES = {
     label: "DealStream",
     kind: "direct",
     searchUrl: (kw, loc, page) =>
-      `https://dealstream.com/search?q=${encodeURIComponent([kw, loc].filter(Boolean).join(" "))}${
-        page > 1 ? `&page=${page}` : ""
-      }`,
+      kw || loc
+        ? `https://dealstream.com/search?q=${encodeURIComponent([kw, loc].filter(Boolean).join(" "))}${
+            page > 1 ? `&page=${page}` : ""
+          }`
+        : `https://dealstream.com/businesses-for-sale${page > 1 ? `?page=${page}` : ""}`,
     linkRe: /^\/[a-z0-9][a-z0-9-]{13,}\/?$/i,
   },
   businessbroker: {
     label: "BusinessBroker.net",
     kind: "direct",
     searchUrl: (kw, loc, page) =>
-      `https://www.businessbroker.net/listings/searchresults.aspx?kw=${encodeURIComponent(kw)}${
-        page > 1 ? `&pg=${page}` : ""
-      }`,
+      kw
+        ? `https://www.businessbroker.net/listings/searchresults.aspx?kw=${encodeURIComponent(kw)}${
+            page > 1 ? `&pg=${page}` : ""
+          }`
+        : `https://www.businessbroker.net/listings/${page > 1 ? `?pg=${page}` : ""}`,
     linkRe: /(business-opportunity|business-for-sale|\/\d{5,}\.aspx$)/i,
   },
   synergybb: {
     label: "Synergy Business Brokers",
     kind: "direct",
-    searchUrl: (kw) => `https://www.synergybb.com/?s=${encodeURIComponent(kw)}`,
+    searchUrl: (kw) =>
+      kw ? `https://www.synergybb.com/?s=${encodeURIComponent(kw)}` : "https://www.synergybb.com/businesses-for-sale/",
     linkRe: /(businesses?-for-sale|listings?)\/[a-z0-9-]{8,}/i,
   },
 };
@@ -253,7 +260,7 @@ function makeListing(src, name, url, text) {
   };
 }
 
-function dedupeByUrl(listings, cap = 10) {
+function dedupeByUrl(listings, cap = 30) {
   const seen = new Set();
   const out = [];
   for (const l of listings) {
@@ -425,7 +432,7 @@ async function scanSearchIndex(src, keyword, location, page, attempts) {
   const q = `site:${src.scope} ${keyword} ${location || ""} for sale`.trim();
   const first = page > 1 ? `&first=${(page - 1) * 10 + 1}` : "";
 
-  const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(q)}&format=rss&count=15${first}`;
+  const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(q)}&format=rss&count=30${first}`;
   const bing = await fetchPage(bingUrl, { accept: "application/rss+xml,application/xml,text/xml;q=0.9,*/*;q=0.8" });
   if (bing.status === 200 && bing.body.includes("<item>")) {
     const listings = dedupeByUrl(parseBingRss(bing.body, src));

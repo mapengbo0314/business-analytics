@@ -51,7 +51,8 @@ export default async function handler(req, res) {
     });
   }
 
-  if (!site || !keyword) return res.status(400).json({ error: "site and keyword required" });
+  // keyword is optional — empty means "browse everything the source lists"
+  if (!site) return res.status(400).json({ error: "site required" });
   if (!SOURCES[site]) return res.status(400).json({ error: "unknown_site", known: Object.keys(SOURCES) });
 
   const result = await scanSource(site, String(keyword), String(location), Math.max(1, Number(page) || 1), !!debug);
