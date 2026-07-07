@@ -172,7 +172,9 @@ export async function fetchViaJina(url) {
   }
 }
 
-const BAD_NAME_RE = /^(view|read|see|more|contact|learn|details?|photos?|next|prev|previous|sign|log|home|about|search|browse|save|share|email|print|page \d)/i;
+// CTA/navigation link text, not company listings: "Sell a business", "Find a
+// broker", "Businesses for sale in Texas", etc.
+const BAD_NAME_RE = /^(view|read|see|more|contact|learn|details?|photos?|next|prev|previous|sign|log|home|about|search|browse|save|share|email|print|sell|buy|find|get|why|how|what|advertise|value|list your|register|join|start|compare|explore|discover|franchises?\b|businesse?s? for sale|business brokers?|brokers?\b|page \d)/i;
 
 function cleanName(s) {
   const name = stripTags(s).replace(/\s+/g, " ").trim();
@@ -180,6 +182,44 @@ function cleanName(s) {
   if (BAD_NAME_RE.test(name)) return null;
   if (name.split(" ").length < 3) return null;
   return name;
+}
+
+// Listing detail pages carry a numeric ID or a long hyphenated slug; category
+// and navigation pages (/sell-a-business/, /find-a-broker/) don't.
+function looksLikeDetail(u) {
+  try {
+    const path = new URL(u).pathname.replace(/\/+$/, "");
+    if (/\d{5,}/.test(path)) return true;
+    const last = (path.split("/").pop() || "").replace(/\.aspx$/i, "");
+    return last.length >= 18 && last.includes("-");
+  } catch {
+    return false;
+  }
+}
+
+// Hard location filter: sources return nationwide results no matter what the
+// query asks for, so when a location is set, a listing must actually mention it.
+const STATE_ABBR = {
+  alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA", colorado: "CO",
+  connecticut: "CT", delaware: "DE", florida: "FL", georgia: "GA", hawaii: "HI", idaho: "ID",
+  illinois: "IL", indiana: "IN", iowa: "IA", kansas: "KS", kentucky: "KY", louisiana: "LA",
+  maine: "ME", maryland: "MD", massachusetts: "MA", michigan: "MI", minnesota: "MN",
+  mississippi: "MS", missouri: "MO", montana: "MT", nebraska: "NE", nevada: "NV",
+  "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+  "north carolina": "NC", "north dakota": "ND", ohio: "OH", oklahoma: "OK", oregon: "OR",
+  pennsylvania: "PA", "rhode island": "RI", "south carolina": "SC", "south dakota": "SD",
+  tennessee: "TN", texas: "TX", utah: "UT", vermont: "VT", virginia: "VA", washington: "WA",
+  "west virginia": "WV", wisconsin: "WI", wyoming: "WY",
+};
+
+export function locationMatches(listing, location) {
+  if (!location || !location.trim()) return true;
+  const wanted = location.trim().toLowerCase();
+  const hayRaw = `${listing.location || ""} ${listing.name || ""} ${listing.note || ""}`;
+  if (hayRaw.toLowerCase().includes(wanted)) return true;
+  const abbr = STATE_ABBR[wanted] || (/^[a-z]{2}$/.test(wanted) ? wanted.toUpperCase() : null);
+  if (abbr) return new RegExp(`\\b${abbr}\\b`).test(hayRaw);
+  return false;
 }
 
 function makeListing(src, name, url, text) {
@@ -285,6 +325,7 @@ export function extractFromHtml(html, baseUrl, linkRe, src) {
       continue;
     }
     if (!(linkRe.test(path) || linkRe.test(abs.href))) continue;
+    if (!looksLikeDetail(abs.href)) continue;
     const name = cleanName(a.inner);
     if (!name) continue;
     const end = i + 1 < anchors.length ? anchors[i + 1].index : a.index + 3000;
@@ -312,6 +353,7 @@ export function extractFromMarkdown(md, linkRe, src) {
       continue;
     }
     if (!(linkRe.test(path) || linkRe.test(a.url))) continue;
+    if (!looksLikeDetail(a.url)) continue;
     const name = cleanName(a.text.replace(/!\[[^\]]*\]/g, " "));
     if (!name) continue;
     const end = i + 1 < matches.length ? matches[i + 1].index : a.index + 2500;
@@ -339,7 +381,7 @@ function parseBingRss(xml, src) {
     const link = pick("link");
     const title = stripTags(pick("title"));
     const desc = stripTags(pick("description"));
-    if (!link || !src.detailRe.test(link)) continue;
+    if (!link || !src.detailRe.test(link) || !looksLikeDetail(link)) continue;
     const name = cleanName(title.replace(new RegExp(`\\s*[-|·]\\s*${src.label}.*$`, "i"), "")) || cleanName(title);
     if (!name) continue;
     items.push(makeListing(src, name, link, `${title} ${desc}`));
@@ -355,7 +397,7 @@ function parseDdgHtml(html, src) {
     let href = decodeEntities(m[1]);
     const uddg = href.match(/[?&]uddg=([^&]+)/);
     if (uddg) href = decodeURIComponent(uddg[1]);
-    if (!src.detailRe.test(href)) continue;
+    if (!src.detailRe.test(href) || !looksLikeDetail(href)) continue;
     const name = cleanName(m[2]);
     if (!name) continue;
     const snippetMatch = m[3].match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div|span)>/i);
@@ -438,6 +480,10 @@ export async function scanSource(siteId, keyword, location = "", page = 1, debug
       src.kind === "direct"
         ? await scanDirect(src, keyword, location, page, attempts)
         : await scanSearchIndex(src, keyword, location, page, attempts);
+    const before = r.listings.length;
+    r.listings = r.listings.filter((l) => locationMatches(l, location));
+    if (r.status === "ok" && !r.listings.length) r.status = "empty";
+    if (debug) r.droppedByLocation = before - r.listings.length;
     return { site: siteId, label: src.label, ...r, ...(debug ? { attempts } : {}) };
   } catch (err) {
     return {
