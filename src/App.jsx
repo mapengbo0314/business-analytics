@@ -72,6 +72,70 @@ const SEED_DEALS = [
 const money = (n) =>
   n == null ? "Not stated" : n >= 1000000 ? `$${(n / 1000000).toFixed(2)}M` : `$${Math.round(n / 1000)}K`;
 
+// ---------- Deal pipeline (mirrors the real acquisition flow) ----------
+const STAGES = [
+  { id: "watching", label: "Watching" },
+  { id: "inquired", label: "Inquired" },
+  { id: "form", label: "Form submitted" },
+  { id: "nda", label: "NDA signed" },
+  { id: "docs", label: "Docs received" },
+  { id: "dd", label: "In due diligence" },
+  { id: "go", label: "Continue ✓" },
+  { id: "passed", label: "Passed ✗" },
+];
+const STAGE_NEXT = {
+  watching: "Next: read the listing and send the inquiry",
+  inquired: "Waiting on the buyer form (user / asset / debt info)",
+  form: "Waiting on the NDA",
+  nda: "Waiting on business docs / financials",
+  docs: "Next: run due diligence — copy the Claude prompt below",
+  dd: "Next: decide — continue or pass",
+  go: "Deal live — keep the momentum",
+  passed: "Archived",
+};
+
+const copyText = async (t) => {
+  try {
+    await navigator.clipboard.writeText(t);
+    return true;
+  } catch (e) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = t;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+      return true;
+    } catch (e2) {
+      return false;
+    }
+  }
+};
+
+function ddPrompt(d, c) {
+  const mult = d.asking != null && d.sde ? (d.asking / d.sde).toFixed(1) + "×" : "not computable";
+  return `You are a rigorous small-business acquisition analyst. I'm evaluating this deal and have attached the business documents I received under NDA (P&L, balance sheet, tax returns, add-back schedule — whatever is attached).
+
+DEAL
+- Name: ${d.name}
+- Location: ${d.location}
+- Source listing: ${d.listingUrl} (${d.source})
+- Claimed figures from the listing: Asking ${money(d.asking)} · SDE/cash flow ${money(d.sde)} · Revenue ${money(d.revenueT12)} · Established ${d.established ?? "not stated"} · Implied multiple ${mult}
+${d.notes ? `- My notes so far: ${d.notes}` : ""}
+
+MY BUY BOX
+- Price ${money(c.priceMin)}–${money(c.priceMax)}, SDE ≥ ${money(c.sdeMin)}, multiple ≤ ${c.multMax}×, SDE margin ≥ ${Math.round(c.marginMin * 100)}%, ${c.ageMin}+ years operating.
+
+ANALYZE — using ONLY the attached documents and the listing facts above; say explicitly when something is missing rather than estimating:
+1. SDE verification: recompute SDE from the statements. Itemize every add-back and flag aggressive or non-standard ones.
+2. Revenue quality: trend over the available years, seasonality, customer concentration, one-time vs recurring.
+3. Balance sheet: working capital the business actually needs, debt/liens, condition and age of FF&E, anything that transfers vs stays with the seller.
+4. Risk register: owner dependence, key employees, lease terms, supplier/customer concentration, regulatory or warranty exposure — ranked by severity.
+5. Valuation: is the asking price justified against verified SDE? Give a defensible offer range with reasoning.
+6. Verdict: proceed / proceed with conditions / walk away — plus the exact list of questions to send the seller before an LOI.`;
+}
+
 const canon = (d) => ((typeof d === "string" ? d : d.listingUrl || d.id) || "").toLowerCase().replace(/\/+$/, "");
 
 // ---------- Local persistence (per-browser) ----------
@@ -154,7 +218,57 @@ Pengbo
 pengbo.dev@gmail.com`;
 }
 
-function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRestore, inSeenList }) {
+function PipelinePanel({ d, criteria, onStage, onNotes }) {
+  const [copied, setCopied] = useState(false);
+  const stage = d.stage || "watching";
+  const daysIn = d.stageAt ? Math.floor((Date.now() - d.stageAt) / 86400000) : null;
+  const stageColor = (id) =>
+    id === "go" ? T.green : id === "passed" ? T.clay : id === "watching" ? T.inkSoft : T.brass;
+  return (
+    <div className="mt-4 pt-3" style={{ borderTop: `1px dashed ${T.line}` }}>
+      <div style={{ fontFamily: T.mono, fontSize: 10.5, letterSpacing: 1.5, color: stageColor(stage) }}>
+        PIPELINE — {STAGE_NEXT[stage]}
+        {daysIn != null && daysIn > 0 ? ` · ${daysIn}d in stage` : ""}
+      </div>
+      <div className="flex flex-wrap gap-1.5 mt-2">
+        {STAGES.map((s) => {
+          const active = s.id === stage;
+          return (
+            <button key={s.id} onClick={() => onStage(s.id)}
+              title={active ? "Current stage" : `Move to "${s.label}"`}
+              style={{
+                fontFamily: T.mono, fontSize: 10.5, padding: "3px 9px", borderRadius: 999,
+                border: `1px solid ${active ? stageColor(s.id) : T.line}`,
+                background: active ? (s.id === "go" ? T.greenSoft : s.id === "passed" ? T.claySoft : T.brassSoft) : "transparent",
+                color: active ? stageColor(s.id) : T.inkSoft,
+                fontWeight: active ? 700 : 400,
+              }}>
+              {s.label}
+            </button>
+          );
+        })}
+      </div>
+      <textarea key={canon(d)} defaultValue={d.notes || ""} rows={2}
+        placeholder="Shared notes — broker contact, docs received, DD findings, red flags…"
+        onBlur={(e) => e.target.value !== (d.notes || "") && onNotes(e.target.value)}
+        className="w-full rounded-md p-2 mt-2"
+        style={{ fontFamily: T.body, fontSize: 12, border: `1px solid ${T.line}`, color: T.ink, background: T.bg, resize: "vertical" }} />
+      <button
+        onClick={async () => {
+          if (await copyText(ddPrompt(d, criteria))) {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2500);
+          }
+        }}
+        className="px-3 py-1.5 rounded-md text-sm mt-1"
+        style={{ border: `1px solid ${T.brass}`, color: copied ? T.green : T.brass, background: "transparent", fontWeight: 600 }}>
+        {copied ? "✓ Copied — paste into claude.ai with the financials attached" : "⧉ Copy due-diligence prompt for Claude"}
+      </button>
+    </div>
+  );
+}
+
+function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRestore, inSeenList, pipeline, onStage, onNotes }) {
   return (
     <article className="rounded-lg p-4" style={{ background: T.surface, border: saved ? `1.5px solid ${T.green}` : `1px solid ${T.line}` }}>
       <div className="flex gap-4">
@@ -222,6 +336,8 @@ function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRes
               ))}
             </div>
           </div>
+
+          {pipeline && <PipelinePanel d={d} criteria={criteria} onStage={onStage} onNotes={onNotes} />}
 
           <div className="flex flex-wrap gap-2 mt-4">
             {sentFlag ? (
@@ -435,8 +551,15 @@ export default function App() {
   const visible = fresh.filter((d) => d.score >= criteria.minScore).sort((a, b) => b.score - a.score);
   const belowCut = fresh.length - visible.length;
   const passedList = scored.filter((d) => isSeen(d));
+  // Active pipeline deals first (furthest along on top), passed ones sink.
+  const stageRank = (d) => STAGES.findIndex((s) => s.id === (d.stage || "watching"));
   const savedList = useMemo(
-    () => Object.values(store.saved).map((d) => ({ ...d, ...scoreDeal(d, criteria) })).sort((a, b) => b.score - a.score),
+    () =>
+      Object.values(store.saved)
+        .map((d) => ({ ...d, ...scoreDeal(d, criteria) }))
+        .sort((a, b) =>
+          (a.stage === "passed") - (b.stage === "passed") || stageRank(b) - stageRank(a) || b.score - a.score
+        ),
     [store.saved, criteria]
   );
 
@@ -447,7 +570,7 @@ export default function App() {
     if (removing) delete next.saved[k];
     else {
       const { checks, score, mult, margin, age, ...snapshot } = d;
-      next.saved[k] = { ...snapshot, savedOn: TODAY };
+      next.saved[k] = { ...snapshot, savedOn: TODAY, stage: "watching", stageAt: Date.now(), notes: "" };
     }
     persist(next);
     if (shared) {
@@ -461,6 +584,21 @@ export default function App() {
       ).catch(() => {});
     }
   };
+  // Patch a saved deal (stage/notes) and sync it to the shared store.
+  const updateSaved = (k, patch) => {
+    const cur = store.saved[k];
+    if (!cur) return;
+    const deal = { ...cur, ...patch };
+    persist({ ...store, saved: { ...store.saved, [k]: deal } });
+    if (shared) {
+      fetch("/api/saved", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deal }),
+      }).catch(() => {});
+    }
+  };
+
   const markSeen = (d) => persist({ ...store, seen: { ...store.seen, [canon(d)]: { on: TODAY, name: d.name } } });
   const restore = (d) => {
     const next = { ...store, seen: { ...store.seen } };
@@ -500,6 +638,9 @@ export default function App() {
     onPass: () => markSeen(d),
     onRestore: () => restore(d),
     inSeenList: !!opts.inSeenList,
+    pipeline: !!opts.pipeline,
+    onStage: (stage) => updateSaved(canon(d), { stage, stageAt: Date.now() }),
+    onNotes: (notes) => updateSaved(canon(d), { notes }),
   });
 
   const tabBtn = (id, label) => (
@@ -621,7 +762,7 @@ export default function App() {
 
           <div className="flex items-center gap-2">
             {tabBtn("today", `Deals above fit ${criteria.minScore} (${visible.length})`)}
-            {tabBtn("saved", `★ Saved (${savedList.length})`)}
+            {tabBtn("saved", `★ Pipeline (${savedList.length})`)}
           </div>
 
           {tab === "today" && (
@@ -673,15 +814,16 @@ export default function App() {
           {tab === "saved" && (
             savedList.length === 0 ? (
               <div className="rounded-lg p-5 text-center" style={{ background: T.surface, border: `1px solid ${T.line}` }}>
-                <div style={{ fontFamily: T.display, fontSize: 16 }}>Nothing saved yet</div>
+                <div style={{ fontFamily: T.display, fontSize: 16 }}>No deals in the pipeline yet</div>
                 <p style={{ fontSize: 12.5, color: T.inkSoft, marginTop: 4 }}>
-                  Tap the ☆ on any deal to pin it here. {shared
-                    ? "Saved deals are shared — everyone who opens this app sees the same star list."
-                    : "Saved deals persist in this browser only (add Upstash env vars in Vercel to share them)."} They never reappear in scans.
+                  Tap the ☆ on any deal to start tracking it here — inquiry → form → NDA → docs → due
+                  diligence → decision. {shared
+                    ? "The pipeline is shared: everyone who opens this app sees the same deals, stages and notes."
+                    : "The pipeline lives in this browser only (add Upstash env vars in Vercel to share it)."} Saved deals never reappear in scans.
                 </p>
               </div>
             ) : (
-              savedList.map((d) => <DealCard key={canon(d)} {...cardProps(d)} />)
+              savedList.map((d) => <DealCard key={canon(d)} {...cardProps(d, { pipeline: true })} />)
             )
           )}
         </section>
