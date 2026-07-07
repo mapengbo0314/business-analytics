@@ -336,6 +336,47 @@ function DocsSection({ d, docsEnabled, onFiles }) {
   );
 }
 
+function UnmatchedEmail({ e, deals, onAssign, onDismiss }) {
+  const [sel, setSel] = useState("");
+  return (
+    <div className="rounded-md p-2.5" style={{ border: `1px dashed ${T.brass}66`, background: T.brassSoft }}>
+      <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>
+        {e.subject} <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 400, color: T.inkSoft }}>· {e.from}</span>
+      </div>
+      {e.snippet && <div style={{ fontSize: 12, color: T.inkSoft, marginTop: 2 }}>{e.snippet}</div>}
+      {e.files && e.files.length > 0 && (
+        <div className="flex flex-wrap gap-x-3 mt-1">
+          {e.files.map((f) => (
+            <a key={f.url} href={f.url} target="_blank" rel="noopener noreferrer"
+              style={{ fontFamily: T.mono, fontSize: 11.5, color: T.green, textDecoration: "underline", textUnderlineOffset: 3 }}>
+              📄 {f.name}
+            </a>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2 mt-2">
+        <select value={sel} onChange={(ev) => setSel(ev.target.value)}
+          className="rounded-md px-2 py-1"
+          style={{ border: `1px solid ${T.line}`, fontSize: 12, background: T.surface, color: T.ink }}>
+          <option value="">Assign to deal…</option>
+          {deals.map((d) => (
+            <option key={canon(d)} value={canon(d)}>{d.name}</option>
+          ))}
+        </select>
+        <button onClick={() => sel && onAssign(e.id, sel)} disabled={!sel}
+          className="px-3 py-1 rounded-md text-sm font-semibold"
+          style={{ background: sel ? T.green : T.line, color: sel ? "#fff" : T.inkSoft }}>
+          Attach
+        </button>
+        <button onClick={() => onDismiss(e.id)} className="px-2 py-1 rounded-md text-sm"
+          style={{ border: `1px solid ${T.line}`, color: T.inkSoft, background: "transparent" }}>
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, onDD, analyzeEnabled, onReport }) {
   const [copied, setCopied] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -616,11 +657,62 @@ export default function App() {
   const [docsEnabled, setDocsEnabled] = useState(false);
   const [inquiryFrom, setInquiryFrom] = useState(null);
   const [analyzeEnabled, setAnalyzeEnabled] = useState(false);
+  const [inbox, setInbox] = useState(null);
+  const loadInbox = () =>
+    fetch("/api/inbox").then((r) => r.json()).then(setInbox).catch(() => {});
   useEffect(() => {
     fetch("/api/upload").then((r) => r.json()).then((d) => setDocsEnabled(!!d.enabled)).catch(() => {});
     fetch("/api/inquire").then((r) => r.json()).then((d) => setInquiryFrom(d.enabled ? d.from : null)).catch(() => {});
     fetch("/api/analyze").then((r) => r.json()).then((d) => setAnalyzeEnabled(!!d.enabled)).catch(() => {});
+    loadInbox();
   }, []);
+
+  // Pull the shared saved-deals state fresh from the server (after inbox syncs
+  // mutate deals server-side).
+  const syncShared = async () => {
+    try {
+      const r = await fetch("/api/saved");
+      const data = await r.json();
+      if (r.ok && data.enabled) {
+        setStore((prev) => {
+          const next = { ...prev, saved: data.saved || {} };
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch (e) { /* private mode */ }
+          return next;
+        });
+      }
+    } catch (e) { /* offline */ }
+  };
+
+  const [inboxSyncing, setInboxSyncing] = useState(false);
+  const [inboxMsg, setInboxMsg] = useState(null);
+  const checkInbox = async () => {
+    setInboxSyncing(true); setInboxMsg(null);
+    try {
+      const r = await fetch("/api/inbox", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.detail || d.error || "sync failed");
+      setInboxMsg(
+        d.checked === 0
+          ? "No new emails."
+          : `${d.checked} new email${d.checked === 1 ? "" : "s"} — ${d.matched} matched to deals, ${d.unmatched} need assignment.`
+      );
+      await syncShared();
+      await loadInbox();
+    } catch (err) {
+      setInboxMsg(`Inbox check failed: ${err.message}`);
+    } finally {
+      setInboxSyncing(false);
+    }
+  };
+  const inboxAssign = async (id, dealKey) => {
+    await fetch("/api/inbox", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "assign", id, dealKey }) }).catch(() => {});
+    await syncShared();
+    await loadInbox();
+  };
+  const inboxDismiss = async (id) => {
+    await fetch("/api/inbox", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss", id }) }).catch(() => {});
+    await loadInbox();
+  };
 
   // Shared stars: when Upstash is configured server-side, /api/saved is the
   // source of truth for everyone using the app. Stars made before sharing was
@@ -1067,6 +1159,33 @@ export default function App() {
                 </div>
               )}
             </>
+          )}
+
+          {tab === "saved" && inbox && inbox.enabled && (
+            <div className="rounded-lg p-4" style={{ background: T.surface, border: `1px solid ${T.line}` }}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div style={{ fontFamily: T.mono, fontSize: 11, letterSpacing: 2, color: T.green }}>
+                  📥 BROKER INBOX — {String(inbox.from || "").toUpperCase()}
+                </div>
+                <button onClick={checkInbox} disabled={inboxSyncing}
+                  className="px-3 py-1.5 rounded-md text-sm font-semibold"
+                  style={{ background: inboxSyncing ? T.line : T.green, color: inboxSyncing ? T.inkSoft : "#fff" }}>
+                  {inboxSyncing ? "Checking…" : "Check inbox now"}
+                </button>
+              </div>
+              <p style={{ fontSize: 11.5, color: T.inkSoft, marginTop: 4 }}>
+                Replies mentioning a deal attach themselves — files to the doc stack, message to the notes,
+                stage advances when docs arrive. Anything ambiguous shows below for one-click assignment.
+              </p>
+              {inboxMsg && <div style={{ fontFamily: T.mono, fontSize: 12, color: T.green, marginTop: 4 }}>{inboxMsg}</div>}
+              {inbox.unmatched && inbox.unmatched.length > 0 && (
+                <div className="flex flex-col gap-2 mt-3">
+                  {inbox.unmatched.map((e) => (
+                    <UnmatchedEmail key={e.id} e={e} deals={savedList} onAssign={inboxAssign} onDismiss={inboxDismiss} />
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           {tab === "saved" && (

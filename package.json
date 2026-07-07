@@ -11,6 +11,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
     "@vercel/blob": "^2.6.0",
+    "imapflow": "^1.4.6",
+    "mailparser": "^3.9.14",
     "nodemailer": "^9.0.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

@@ -63,6 +63,12 @@ Three mechanisms, so it works on any Vercel plan:
    The inquiry dialog gains a "Send from …" button (SMTP, ~500 emails/day free)
    and sending auto-advances the deal to "Inquired". Without these it falls
    back to opening your email app.
+   The same credentials also power **inbox ingestion**: the Pipeline tab gets a
+   "Check inbox now" button that reads new Gmail replies over IMAP, matches
+   them to deals by name/listing URL, uploads attachments to the deal's
+   document stack (needs the Blob store), appends the message to the deal's
+   notes, and advances the stage when docs arrive. Ambiguous emails queue for
+   one-click assignment. (Requires the Upstash Redis vars too.)
 6. **(Optional, pay-per-use) In-app Claude analysis.** Add `ANTHROPIC_API_KEY`
    (console.anthropic.com) and each pipeline deal gets an **"Analyze with
    Claude"** button: the deal's uploaded documents (PDF/CSV/TXT/images) are
