@@ -46,7 +46,15 @@ Three mechanisms, so it works on any Vercel plan:
    app shares one saved list (existing per-browser stars upload themselves on
    first visit), and the digest remembers what it already emailed. Note there's
    no per-user login — anyone with the app URL shares the same star list.
-4. **(Optional) Protect the cron endpoint.** Add `CRON_SECRET` (any random string);
+4. **(Optional, $0) Broker document uploads.** Vercel dashboard → Storage →
+   Create → **Blob** → connect to this project (adds `BLOB_READ_WRITE_TOKEN`),
+   then redeploy. Each pipeline deal gets an upload button for the docs the
+   broker sends after the NDA (P&L, balance sheets, tax returns — pdf/xlsx/csv/
+   docx/zip/images, up to 100MB each). Files upload from the browser straight
+   to Blob storage, and the links attach to the deal so everyone sees the same
+   document stack. Blob URLs are public-but-unguessable — fine for a small
+   trusted group, but don't post them anywhere.
+5. **(Optional) Protect the cron endpoint.** Add `CRON_SECRET` (any random string);
    Vercel automatically sends it with cron invocations.
 
 ## Local development

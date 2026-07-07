@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from "react";
+import { upload } from "@vercel/blob/client";
 
 // ---------- Design tokens: "Underwriter's ledger" ----------
 const T = {
@@ -143,6 +144,7 @@ DEAL
 - Source listing: ${d.listingUrl} (${d.source})
 - Claimed figures from the listing: Asking ${money(d.asking)} · SDE/cash flow ${money(d.sde)} · Revenue ${money(d.revenueT12)} · Established ${d.established ?? "not stated"} · Implied multiple ${mult}
 ${d.notes ? `- My notes so far: ${d.notes}` : ""}
+${d.files && d.files.length ? `- Documents on file (attached to this conversation): ${d.files.map((f) => f.name).join(", ")}` : ""}
 
 MY BUY BOX
 - Price ${money(c.priceMin)}–${money(c.priceMax)}, SDE ≥ ${money(c.sdeMin)}, multiple ≤ ${c.multMax}×, SDE margin ≥ ${Math.round(c.marginMin * 100)}%, ${c.ageMin}+ years operating.
@@ -238,7 +240,84 @@ Pengbo
 pengbo.dev@gmail.com`;
 }
 
-function PipelinePanel({ d, criteria, onStage, onNotes }) {
+const fmtSize = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+
+function DocsSection({ d, docsEnabled, onFiles }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const inputRef = useRef(null);
+  const files = d.files || [];
+
+  const handlePick = async (e) => {
+    const picked = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!picked.length) return;
+    setBusy(true); setErr(null);
+    const added = [];
+    for (const f of picked) {
+      try {
+        const blob = await upload(`deals/${(d.name || "deal").replace(/[^a-z0-9]+/gi, "-").slice(0, 60)}/${f.name}`, f, {
+          access: "public",
+          handleUploadUrl: "/api/upload",
+        });
+        added.push({ name: f.name, url: blob.url, size: f.size, at: Date.now() });
+      } catch (upErr) {
+        console.error(upErr);
+        setErr(`Upload failed for ${f.name} — check the file type/size and try again.`);
+      }
+    }
+    if (added.length) onFiles([...files, ...added]);
+    setBusy(false);
+  };
+
+  const removeFile = (file) => {
+    onFiles(files.filter((f) => f.url !== file.url));
+    fetch(`/api/upload?url=${encodeURIComponent(file.url)}`, { method: "DELETE" }).catch(() => {});
+  };
+
+  return (
+    <div className="mt-3">
+      <div style={{ fontFamily: T.mono, fontSize: 10, letterSpacing: 1.5, color: T.inkSoft, textTransform: "uppercase" }}>
+        Documents from the broker / entity
+      </div>
+      {files.length > 0 && (
+        <div className="flex flex-col gap-1 mt-1.5">
+          {files.map((f) => (
+            <div key={f.url} className="flex items-center gap-2" style={{ fontSize: 12 }}>
+              <a href={f.url} target="_blank" rel="noopener noreferrer"
+                style={{ fontFamily: T.mono, color: T.green, textDecoration: "underline", textUnderlineOffset: 3 }}>
+                📄 {f.name}
+              </a>
+              <span style={{ color: T.inkSoft, fontSize: 11 }}>
+                {f.size ? fmtSize(f.size) : ""}{f.at ? ` · ${new Date(f.at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : ""}
+              </span>
+              <button onClick={() => removeFile(f)} aria-label={`Remove ${f.name}`}
+                style={{ background: "none", border: "none", color: T.clay, fontSize: 13, lineHeight: 1 }}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {docsEnabled ? (
+        <>
+          <input ref={inputRef} type="file" multiple style={{ display: "none" }} onChange={handlePick}
+            accept=".pdf,.xls,.xlsx,.xlsm,.csv,.doc,.docx,.txt,.zip,.png,.jpg,.jpeg,.webp" />
+          <button onClick={() => inputRef.current && inputRef.current.click()} disabled={busy}
+            className="px-3 py-1.5 rounded-md text-sm mt-1.5"
+            style={{ border: `1px dashed ${T.green}`, color: T.green, background: "transparent", fontWeight: 600 }}>
+            {busy ? "Uploading…" : "＋ Upload docs (P&L, balance sheet, tax returns…)"}
+          </button>
+          {err && <div style={{ color: T.clay, fontSize: 11.5, marginTop: 4 }}>{err}</div>}
+        </>
+      ) : (
+        <div style={{ fontSize: 11.5, color: T.inkSoft, marginTop: 4 }}>
+          Uploads are off — in Vercel: Storage → Create → <b>Blob</b> → connect to this project, then redeploy.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles }) {
   const [copied, setCopied] = useState(false);
   const stage = d.stage || "watching";
   const daysIn = d.stageAt ? Math.floor((Date.now() - d.stageAt) / 86400000) : null;
@@ -268,6 +347,7 @@ function PipelinePanel({ d, criteria, onStage, onNotes }) {
           );
         })}
       </div>
+      <DocsSection d={d} docsEnabled={docsEnabled} onFiles={onFiles} />
       <textarea key={canon(d)} defaultValue={d.notes || ""} rows={2}
         placeholder="Shared notes — broker contact, docs received, DD findings, red flags…"
         onBlur={(e) => e.target.value !== (d.notes || "") && onNotes(e.target.value)}
@@ -288,7 +368,7 @@ function PipelinePanel({ d, criteria, onStage, onNotes }) {
   );
 }
 
-function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRestore, inSeenList, pipeline, onStage, onNotes }) {
+function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRestore, inSeenList, pipeline, onStage, onNotes, docsEnabled, onFiles }) {
   return (
     <article className="rounded-lg p-4" style={{ background: T.surface, border: saved ? `1.5px solid ${T.green}` : `1px solid ${T.line}` }}>
       <div className="flex gap-4">
@@ -357,7 +437,7 @@ function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRes
             </div>
           </div>
 
-          {pipeline && <PipelinePanel d={d} criteria={criteria} onStage={onStage} onNotes={onNotes} />}
+          {pipeline && <PipelinePanel d={d} criteria={criteria} onStage={onStage} onNotes={onNotes} docsEnabled={docsEnabled} onFiles={onFiles} />}
 
           <div className="flex flex-wrap gap-2 mt-4">
             {sentFlag ? (
@@ -440,6 +520,15 @@ export default function App() {
       try { localStorage.setItem(SITES_KEY, JSON.stringify(next)); } catch (e) { /* private mode */ }
       return next;
     });
+
+  // Document uploads need a Vercel Blob store connected (BLOB_READ_WRITE_TOKEN).
+  const [docsEnabled, setDocsEnabled] = useState(false);
+  useEffect(() => {
+    fetch("/api/upload")
+      .then((r) => r.json())
+      .then((data) => setDocsEnabled(!!data.enabled))
+      .catch(() => {});
+  }, []);
 
   // Shared stars: when Upstash is configured server-side, /api/saved is the
   // source of truth for everyone using the app. Stars made before sharing was
@@ -661,6 +750,8 @@ export default function App() {
     pipeline: !!opts.pipeline,
     onStage: (stage) => updateSaved(canon(d), { stage, stageAt: Date.now() }),
     onNotes: (notes) => updateSaved(canon(d), { notes }),
+    onFiles: (files) => updateSaved(canon(d), { files }),
+    docsEnabled,
   });
 
   const tabBtn = (id, label) => (
