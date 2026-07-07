@@ -305,6 +305,40 @@ export default function App() {
       return next;
     });
 
+  // Shared stars: when Upstash is configured server-side, /api/saved is the
+  // source of truth for everyone using the app. Stars made before sharing was
+  // enabled (or while offline) are pushed up on first sync.
+  const [shared, setShared] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/saved");
+        const data = await r.json();
+        if (cancelled || !r.ok || !data.enabled) return;
+        setShared(true);
+        const remote = data.saved || {};
+        const local = loadStore().saved || {};
+        for (const [k, d] of Object.entries(local)) {
+          if (!remote[k]) {
+            remote[k] = d;
+            fetch("/api/saved", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ deal: d }),
+            }).catch(() => {});
+          }
+        }
+        setStore((prev) => {
+          const next = { ...prev, saved: remote };
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch (e) { /* private mode */ }
+          return next;
+        });
+      } catch (e) { /* endpoint unreachable — stay in per-browser mode */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const isSaved = (d) => !!store.saved[canon(d)];
   const isSeen = (d) => !!store.seen[canon(d)];
   const isSent = (d) => !!store.sent[canon(d)];
@@ -409,12 +443,23 @@ export default function App() {
   const toggleSave = (d) => {
     const k = canon(d);
     const next = { ...store, saved: { ...store.saved } };
-    if (next.saved[k]) delete next.saved[k];
+    const removing = !!next.saved[k];
+    if (removing) delete next.saved[k];
     else {
       const { checks, score, mult, margin, age, ...snapshot } = d;
       next.saved[k] = { ...snapshot, savedOn: TODAY };
     }
     persist(next);
+    if (shared) {
+      (removing
+        ? fetch(`/api/saved?url=${encodeURIComponent(k)}`, { method: "DELETE" })
+        : fetch("/api/saved", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ deal: next.saved[k] }),
+          })
+      ).catch(() => {});
+    }
   };
   const markSeen = (d) => persist({ ...store, seen: { ...store.seen, [canon(d)]: { on: TODAY, name: d.name } } });
   const restore = (d) => {
@@ -489,7 +534,7 @@ export default function App() {
             </div>
             <div style={{ fontSize: 12, color: T.inkSoft }}>Email digest every 5 hours → pengbo.dev@gmail.com</div>
             <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.green, marginTop: 2 }}>
-              ● Direct scrape — no AI · dedup by listing URL
+              ● Direct scrape — no AI · {shared ? "★ shared with your team" : "★ this browser only"}
               {lastScanAt ? ` · last refresh ${new Date(lastScanAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}` : ""}
             </div>
           </div>
@@ -630,7 +675,9 @@ export default function App() {
               <div className="rounded-lg p-5 text-center" style={{ background: T.surface, border: `1px solid ${T.line}` }}>
                 <div style={{ fontFamily: T.display, fontSize: 16 }}>Nothing saved yet</div>
                 <p style={{ fontSize: 12.5, color: T.inkSoft, marginTop: 4 }}>
-                  Tap the ☆ on any deal to pin it here. Saved deals persist in this browser and never reappear in scans.
+                  Tap the ☆ on any deal to pin it here. {shared
+                    ? "Saved deals are shared — everyone who opens this app sees the same star list."
+                    : "Saved deals persist in this browser only (add Upstash env vars in Vercel to share them)."} They never reappear in scans.
                 </p>
               </div>
             ) : (

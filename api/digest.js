@@ -14,6 +14,7 @@
 //   CRON_SECRET        (optional — if set, requests must carry Authorization: Bearer <secret>)
 
 import { SOURCE_IDS, scanSource } from "./_lib/scrape.js";
+import { redis } from "./_lib/redis.js";
 
 const BOX = { priceMin: 200000, priceMax: 1500000, sdeMin: 150000, multMax: 4.0, marginMin: 0.15, ageMin: 5 };
 const YEAR = new Date().getFullYear();
@@ -35,17 +36,6 @@ const money = (n) =>
   n == null ? "Not stated" : n >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : `$${Math.round(n / 1e3)}K`;
 const canon = (u) => (u || "").toLowerCase().replace(/\/+$/, "");
 const esc = (s) => String(s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-
-// ---- Optional Upstash Redis seen-registry (free tier) ----
-async function redis(cmd) {
-  const url = process.env.UPSTASH_REDIS_REST_URL, tok = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !tok) return null;
-  const r = await fetch(`${url}/${cmd.map(encodeURIComponent).join("/")}`, {
-    headers: { Authorization: `Bearer ${tok}` },
-  });
-  const j = await r.json();
-  return j.result;
-}
 
 export default async function handler(req, res) {
   if (process.env.CRON_SECRET) {
@@ -82,7 +72,7 @@ export default async function handler(req, res) {
 
   // 3. Drop anything emailed in a previous digest (Upstash, if configured)
   let dedupNote = "No-repeat registry: not configured (add Upstash env vars to enable).";
-  const already = await redis(["SMEMBERS", "digest:seen"]);
+  const already = await redis(["SMEMBERS", "digest:seen"]).catch(() => null);
   if (already !== null) {
     const prior = new Set(already || []);
     listings = listings.filter((d) => !prior.has(canon(d.listingUrl)));
@@ -100,7 +90,7 @@ export default async function handler(req, res) {
 
   // 6. Record what we're about to send, so the next run never repeats it
   if (already !== null) {
-    await redis(["SADD", "digest:seen", ...qualified.map((d) => canon(d.listingUrl))]);
+    await redis(["SADD", "digest:seen", ...qualified.map((d) => canon(d.listingUrl))]).catch(() => {});
   }
 
   // 7. Render the email

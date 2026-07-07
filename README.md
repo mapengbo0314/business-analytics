@@ -38,9 +38,14 @@ Three mechanisms, so it works on any Vercel plan:
    - `WATCH_KEYWORD` / `WATCH_LOCATION` — defaults: HVAC / Texas
    - `FIT_MIN` — defaults to 40
    The digest only sends when there's something new above the cutoff.
-3. **(Optional) No-repeat digests across runs.** Create a free Upstash Redis database
-   (Vercel Marketplace → Upstash) and add:
+3. **(Optional, $0) Shared starred deals + no-repeat digests.** Create a free
+   Upstash Redis database (Vercel dashboard → Storage/Marketplace → Upstash →
+   free plan, ~500K commands/month) and add:
    - `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
+   With these set, ★ stars sync through `/api/saved` so everyone who opens the
+   app shares one saved list (existing per-browser stars upload themselves on
+   first visit), and the digest remembers what it already emailed. Note there's
+   no per-user login — anyone with the app URL shares the same star list.
 4. **(Optional) Protect the cron endpoint.** Add `CRON_SECRET` (any random string);
    Vercel automatically sends it with cron invocations.
 
