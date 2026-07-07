@@ -256,7 +256,9 @@ function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRes
 export default function App() {
   const [criteria, setCriteria] = useState({
     priceMin: 200000, priceMax: 1500000,
-    sdeMin: 150000, multMax: 4.0, marginMin: 0.15, ageMin: 5, minScore: 40,
+    // minScore starts at 0: scraped listings often omit financials, and unstated
+    // figures score as failed checks — a high default cutoff would hide everything.
+    sdeMin: 150000, multMax: 4.0, marginMin: 0.15, ageMin: 5, minScore: 0,
   });
   const [emailDeal, setEmailDeal] = useState(null);
   const [draft, setDraft] = useState("");
@@ -396,7 +398,7 @@ export default function App() {
     [pool, criteria]
   );
   const fresh = scored.filter((d) => !isSeen(d) && !isSaved(d));
-  const visible = fresh.filter((d) => d.score > criteria.minScore).sort((a, b) => b.score - a.score);
+  const visible = fresh.filter((d) => d.score >= criteria.minScore).sort((a, b) => b.score - a.score);
   const belowCut = fresh.length - visible.length;
   const passedList = scored.filter((d) => isSeen(d));
   const savedList = useMemo(
