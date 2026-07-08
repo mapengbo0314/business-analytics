@@ -195,7 +195,7 @@ export function parseMoney(raw) {
 // pipes, or nothing at all — tolerate all of it. Amounts can be "$675,000",
 // "$1.2M", or "$1.2 million".
 const AMOUNT = "([\\d.,]+\\s*(?:million|mil\\b|mm\\b|thousand|[kKmM])?)";
-const SEP = "[\\s:*_\\-–—|]{0,8}";
+const SEP = "(?:\\s|from|approx\\.?|[:*_~≈()\\-–—|])*";
 const FIELDS = {
   asking: new RegExp(`(?:asking\\s*price|asking|list(?:ed)?\\s*price|sale\\s*price|price)${SEP}\\$\\s*${AMOUNT}`, "i"),
   sde: new RegExp(`(?:cash\\s*flow|sde\\b|seller'?s\\s*discretionary\\s*earnings|discretionary\\s*earnings|net\\s*profit)${SEP}\\$\\s*${AMOUNT}`, "i"),
@@ -391,8 +391,16 @@ export function locationMatches(listing, location) {
   return true;
 }
 
-function makeListing(src, name, url, text) {
+function makeListing(src, name, url, text, priceHint) {
   const f = extractFields(text);
+  // Some index layouts print the price in a label line just BEFORE the title
+  // link; consult that slice only when the forward window found no figure.
+  if (priceHint && f.asking == null && f.sde == null && f.revenueT12 == null) {
+    const pf = extractFields(priceHint);
+    f.asking = pf.asking;
+    f.sde = pf.sde;
+    f.revenueT12 = pf.revenueT12;
+  }
   const snippet = text.replace(/\s+/g, " ").trim().slice(0, 180);
   return {
     name,
@@ -530,7 +538,13 @@ export function extractFromMarkdown(md, linkRe, src) {
       .slice(a.index, Math.min(end, a.index + 2500))
       .replace(/[\\*_#>|\[\]()]/g, " ")
       .replace(/\s+/g, " ");
-    items.push(makeListing(src, name, a.url, windowText));
+    // Index cards often print "Asking Price: $X" just BEFORE the title link.
+    // Pass a short preceding slice (clamped to the previous card) so money is
+    // found there when the forward window has none — kept tight to avoid
+    // bleeding the previous card's price/location into this one.
+    const preStart = Math.max(i > 0 ? matches[i - 1].index : 0, a.index - 120);
+    const preText = md.slice(preStart, a.index).replace(/[\\*_#>|\[\]()]/g, " ").replace(/\s+/g, " ");
+    items.push(makeListing(src, name, a.url, windowText, preText));
   }
   if (items.length) return dedupeByUrl(items);
 
@@ -551,7 +565,9 @@ export function extractFromMarkdown(md, linkRe, src) {
     if (!name) continue;
     const end = i + 1 < bare.length ? bare[i + 1].index : bare[i].index + 1500;
     const windowText = md.slice(bare[i].index, Math.min(end, bare[i].index + 1500)).replace(/[\\*_#>|\[\]()]/g, " ").replace(/\s+/g, " ");
-    items.push(makeListing(src, name, url, windowText));
+    const preStart = Math.max(i > 0 ? bare[i - 1].index : 0, bare[i].index - 120);
+    const preText = md.slice(preStart, bare[i].index).replace(/[\\*_#>|\[\]()]/g, " ").replace(/\s+/g, " ");
+    items.push(makeListing(src, name, url, windowText, preText));
   }
   return dedupeByUrl(items);
 }
@@ -587,7 +603,8 @@ function parseDdgHtml(html, src) {
     let href = decodeEntities(m[1]);
     const uddg = href.match(/[?&]uddg=([^&]+)/);
     if (uddg) href = decodeURIComponent(uddg[1]);
-    if (!src.detailRe.test(href) || !isDetail(href, src)) continue;
+    const dre = src.detailRe || src.linkRe;
+    if ((dre && !dre.test(href)) || !isDetail(href, src)) continue;
     const name = cleanName(m[2]);
     if (!name) continue;
     const snippetMatch = m[3].match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div|span)>/i);
@@ -619,6 +636,20 @@ async function jinaBingSerp(src, keyword, location, page, attempts) {
   return listings;
 }
 
+// DuckDuckGo HTML site-search — proven to work from datacenter IPs and is
+// keyword+location scoped, so results need no keyword post-filter. Primary path
+// for every source.
+async function ddgSiteSearch(src, keyword, location, page, attempts) {
+  const scope = src.scope || src.domain;
+  if (!scope) return [];
+  const q = `site:${scope} ${keyword || ""} ${location || ""} for sale`.trim();
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}${page > 1 ? `&s=${(page - 1) * 10}` : ""}`;
+  const r = await fetchPage(url);
+  const listings = r.status === 200 ? parseDdgHtml(r.body, src) : [];
+  note(attempts, "ddg-html", url, r, listings.length);
+  return listings;
+}
+
 async function scanSearchIndex(src, keyword, location, page, attempts) {
   const q = `site:${src.scope} ${keyword} ${location || ""} for sale`.trim();
   const first = page > 1 ? `&first=${(page - 1) * 10 + 1}` : "";
@@ -635,7 +666,7 @@ async function scanSearchIndex(src, keyword, location, page, attempts) {
   const ddg = await fetchPage(ddgUrl);
   const ddgListings = ddg.status === 200 ? parseDdgHtml(ddg.body, src) : [];
   note(attempts, "ddg-html", ddgUrl, ddg, ddgListings.length);
-  if (ddgListings.length) return { status: "ok", httpStatus: 200, via: "ddg-html", listings: ddgListings };
+  if (ddgListings.length) return { status: "ok", httpStatus: 200, via: "ddg-html", listings: ddgListings, keywordScoped: !!keyword };
 
   // Search engines block datacenter IPs — read the marketplace's own search page
   // through Jina Reader instead. If the keyword-specific page yields nothing
@@ -652,10 +683,10 @@ async function scanSearchIndex(src, keyword, location, page, attempts) {
     const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.detailRe, src) : [];
     note(attempts, "jina-reader", pages[i], jina, jinaListings.length);
     if (jinaListings.length)
-      return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: i > 0 };
+      return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: i > 0, keywordScoped: keyword && i === 0 };
   }
   const serp = await jinaBingSerp(src, keyword, location, page, attempts);
-  if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp };
+  if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp, keywordScoped: !!keyword };
   if (jina.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
   const httpStatus = jina.status || ddg.status || bing.status || 0;
@@ -668,14 +699,21 @@ async function scanSearchIndex(src, keyword, location, page, attempts) {
 }
 
 async function scanDirect(src, keyword, location, page, attempts) {
+  // 1. DDG site-search first — keyword-scoped, works from datacenter IPs, and
+  //    reaches the actual detail pages even when the site bot-walls Jina.
+  const ddg = await ddgSiteSearch(src, keyword, location, page, attempts);
+  if (ddg.length) return { status: "ok", httpStatus: 200, via: "ddg-html", listings: ddg, keywordScoped: !!keyword };
+
+  // 2. Fetch the site's own browse page directly.
   const url = src.searchUrl(keyword, location, page);
   const r = await fetchPage(url);
+  const kwInUrl = keyword && url !== src.searchUrl("", location, page);
   const directListings = r.status === 200 ? extractFromHtml(r.body, url, src.linkRe, src) : [];
   note(attempts, "direct", url, r, directListings.length);
-  if (directListings.length) return { status: "ok", httpStatus: 200, via: "direct", listings: directListings };
+  if (directListings.length)
+    return { status: "ok", httpStatus: 200, via: "direct", listings: directListings, keywordScoped: !!kwInUrl };
 
-  // Blocked, erroring, or a page we couldn't parse — retry through Jina Reader,
-  // falling back to the generic browse page when the keyword page yields nothing.
+  // 3. Retry through Jina Reader (keyword page, then generic browse page).
   const pages = [url];
   if (keyword) {
     const generic = src.searchUrl("", location, page);
@@ -687,10 +725,11 @@ async function scanDirect(src, keyword, location, page, attempts) {
     const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.linkRe, src) : [];
     note(attempts, "jina-reader", pages[i], jina, jinaListings.length);
     if (jinaListings.length)
-      return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: i > 0 };
+      return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: !kwInUrl || i > 0, keywordScoped: kwInUrl && i === 0 };
   }
+  // 4. Last resort: Jina fetches the Bing SERP.
   const serp = await jinaBingSerp(src, keyword, location, page, attempts);
-  if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp };
+  if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp, keywordScoped: !!keyword };
   if (jina.status === 200 || r.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
   const httpStatus = jina.status || r.status || 0;
@@ -724,7 +763,7 @@ export async function scanSource(siteId, keyword, location = "", page = 1, debug
     if (debug) r.droppedByLocation = before - r.listings.length;
     // Sources whose browse pages can't carry the keyword in the URL list every
     // industry — keep only listings that actually mention the keyword.
-    if (keyword && (src.kwFilter || r.usedGenericPage)) {
+    if (keyword && !r.keywordScoped) {
       const words = String(keyword).toLowerCase().split(/\s+/).filter((w) => w.length > 2);
       if (words.length) {
         const beforeKw = r.listings.length;
