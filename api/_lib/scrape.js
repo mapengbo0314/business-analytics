@@ -93,6 +93,7 @@ export const SOURCES = {
   dealstream: {
     label: "DealStream",
     kind: "direct",
+    domain: "dealstream.com",
     // Real formats: dealstream.com/{state}/{kw}-businesses-for-sale (browse)
     // and dealstream.com/d/biz-sale/{cat}/{slug} (detail)
     searchUrl: (kw, loc, page) => {
@@ -106,6 +107,7 @@ export const SOURCES = {
   businessbroker: {
     label: "BusinessBroker.net",
     kind: "direct",
+    domain: "businessbroker.net",
     // Real formats: /state/{state}-businesses-for-sale.aspx (browse) and
     // /business-for-sale/{slug}/{id}.aspx (detail). No keyword browse URL —
     // listings are keyword-filtered after extraction (kwFilter).
@@ -121,17 +123,20 @@ export const SOURCES = {
   synergybb: {
     label: "Synergy Business Brokers",
     kind: "direct",
+    domain: "synergybb.com",
     // Real format: synergybb.com/businesses-for-sale/{state}/ (browse).
     searchUrl: (kw, loc, page) => {
       const st = stateSlug(loc);
       return `https://synergybb.com/businesses-for-sale/${st ? `${st}/` : ""}${pageQ(page)}`;
     },
     linkRe: /(businesses?-for-sale|listings?)\/[a-z0-9-]{8,}/i,
+    detailOk: /synergybb\.com\/listings\/[a-z0-9-]{8,}/i, // real detail namespace
     kwFilter: true,
   },
   sunbelt: {
     label: "Sunbelt Network",
     kind: "direct",
+    domain: "sunbeltnetwork.com",
     // Real formats: /business-search/business-results/state-{state}/ (browse);
     // details at .../listing-details/{slug}/ or /business-search/business-details/{slug}/
     searchUrl: (kw, loc, page) => {
@@ -203,7 +208,27 @@ const LOCATION_RE = /\b([A-Z][a-zA-Z.\-']+(?:\s+[A-Z][a-zA-Z.\-']+){0,3},\s*(?:[
 
 export function extractFields(text) {
   const out = { asking: null, sde: null, revenueT12: null, established: null, location: null };
+  // Grid/table cards (e.g. Synergy) render labels in one row and values in the
+  // next: "Price  Revenue  Cash Flow  $3.5M  $8M  $1.2M". When labels and
+  // amounts appear in equal count with ALL labels before ANY amount, zip them
+  // by position — and do it BEFORE the adjacency pass, which would otherwise
+  // pair the last header label with the first value.
+  {
+    const labelRe = /\b(asking\s*price|price|annual\s*revenue|gross\s*revenue|revenue|cash\s*flow|sde)\b/gi;
+    const moneyRe = /\$\s*[\d.,]+\s*(?:million|mil\b|mm\b|thousand|[kKmM])?/gi;
+    const labels = [...text.matchAll(labelRe)];
+    const monies = [...text.matchAll(moneyRe)];
+    if (labels.length >= 2 && labels.length === monies.length && labels[labels.length - 1].index < monies[0].index) {
+      const fieldOf = (lab) =>
+        /price/i.test(lab) ? "asking" : /revenue/i.test(lab) ? "revenueT12" : "sde";
+      labels.forEach((l, i) => {
+        const f = fieldOf(l[1]);
+        if (out[f] == null) out[f] = parseMoney(monies[i][0]);
+      });
+    }
+  }
   for (const [k, re] of Object.entries(FIELDS)) {
+    if (out[k] != null) continue;
     const m = text.match(re);
     if (m) out[k] = parseMoney(m[1]);
   }
@@ -251,7 +276,7 @@ export async function fetchPage(url, extraHeaders = {}) {
 // markdown — free and keyless (rate-limited, but our 5h edge cache absorbs that).
 export async function fetchViaJina(url) {
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 25000);
+  const t = setTimeout(() => controller.abort(), 14000);
   try {
     const r = await fetch(`https://r.jina.ai/${url}`, {
       signal: controller.signal,
@@ -524,6 +549,22 @@ const note = (attempts, via, url, r, found) =>
     sample: (r.body || r.error || "").slice(0, via === "jina-reader" ? 900 : 160),
   });
 
+// Last-resort stage for every source: have Jina fetch Bing's results for a
+// site:-scoped query. The marketplaces' own pages can bot-wall even Jina, but
+// Bing's SERP (fetched from Jina's infra) lists their listing URLs + snippets.
+async function jinaBingSerp(src, keyword, location, page, attempts) {
+  const scope = src.scope || src.domain;
+  const q = `site:${scope} ${keyword || ""} ${location || ""} for sale`.trim();
+  const url = `https://www.bing.com/search?q=${encodeURIComponent(q)}&count=30${
+    page > 1 ? `&first=${(page - 1) * 10 + 1}` : ""
+  }`;
+  const jina = await fetchViaJina(url);
+  const listings =
+    jina.status === 200 ? extractFromMarkdown(jina.body, src.detailRe || src.linkRe, src) : [];
+  note(attempts, "jina-bing", url, jina, listings.length);
+  return listings;
+}
+
 async function scanSearchIndex(src, keyword, location, page, attempts) {
   const q = `site:${src.scope} ${keyword} ${location || ""} for sale`.trim();
   const first = page > 1 ? `&first=${(page - 1) * 10 + 1}` : "";
@@ -559,6 +600,8 @@ async function scanSearchIndex(src, keyword, location, page, attempts) {
     if (jinaListings.length)
       return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: i > 0 };
   }
+  const serp = await jinaBingSerp(src, keyword, location, page, attempts);
+  if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp };
   if (jina.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
   const httpStatus = jina.status || ddg.status || bing.status || 0;
@@ -592,6 +635,8 @@ async function scanDirect(src, keyword, location, page, attempts) {
     if (jinaListings.length)
       return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: i > 0 };
   }
+  const serp = await jinaBingSerp(src, keyword, location, page, attempts);
+  if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp };
   if (jina.status === 200 || r.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
   const httpStatus = jina.status || r.status || 0;
@@ -614,6 +659,12 @@ export async function scanSource(siteId, keyword, location = "", page = 1, debug
       src.kind === "direct"
         ? await scanDirect(src, keyword, location, page, attempts)
         : await scanSearchIndex(src, keyword, location, page, attempts);
+    // Sold / pending / off-market listings are dead ends — drop them outright.
+    const SOLD_RE = /\b(sold|sale\s*pending|under\s*contract|off[-\s]?market|no\s*longer\s*(?:available|for\s*sale))\b/i;
+    const beforeSold = r.listings.length;
+    r.listings = r.listings.filter((l) => !SOLD_RE.test(`${l.name} ${l.note}`));
+    if (debug) r.droppedSold = beforeSold - r.listings.length;
+
     const before = r.listings.length;
     r.listings = r.listings.filter((l) => locationMatches(l, location));
     if (debug) r.droppedByLocation = before - r.listings.length;
