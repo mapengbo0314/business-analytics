@@ -175,20 +175,26 @@ export function stripTags(html) {
 
 export function parseMoney(raw) {
   if (raw == null) return null;
-  const m = String(raw).replace(/,/g, "").match(/(\d+(?:\.\d+)?)\s*([kKmM])?/);
+  const m = String(raw).replace(/,/g, "").match(/(\d+(?:\.\d+)?)\s*(million|mil\b|mm\b|thousand|[kKmM])?/i);
   if (!m) return null;
   let n = parseFloat(m[1]);
-  if (/m/i.test(m[2] || "")) n *= 1e6;
-  else if (/k/i.test(m[2] || "")) n *= 1e3;
+  const suf = (m[2] || "").toLowerCase();
+  if (suf.startsWith("m")) n *= 1e6;
+  else if (suf === "thousand" || suf === "k") n *= 1e3;
   n = Math.round(n);
   return n >= 1000 && n < 1e9 ? n : null; // ignore junk numbers
 }
 
 // Financial fields stated in plain text near/inside a listing card.
+// Between a label and its value pages put colons, dashes, markdown bold (**),
+// pipes, or nothing at all — tolerate all of it. Amounts can be "$675,000",
+// "$1.2M", or "$1.2 million".
+const AMOUNT = "([\\d.,]+\\s*(?:million|mil\\b|mm\\b|thousand|[kKmM])?)";
+const SEP = "[\\s:*_\\-–—|]{0,8}";
 const FIELDS = {
-  asking: /(?:asking\s*price|list(?:ed)?\s*price|price)\s*[:\-–]?\s*\$\s*([\d.,]+\s*[kKmM]?)/i,
-  sde: /(?:cash\s*flow|sde\b|seller'?s\s*discretionary\s*earnings|discretionary\s*earnings)\s*[:\-–]?\s*\$\s*([\d.,]+\s*[kKmM]?)/i,
-  revenueT12: /(?:gross\s*revenue|revenue|gross\s*sales|annual\s*sales|sales|gross\s*income)\s*[:\-–]?\s*\$\s*([\d.,]+\s*[kKmM]?)/i,
+  asking: new RegExp(`(?:asking\\s*price|asking|list(?:ed)?\\s*price|sale\\s*price|price)${SEP}\\$\\s*${AMOUNT}`, "i"),
+  sde: new RegExp(`(?:cash\\s*flow|sde\\b|seller'?s\\s*discretionary\\s*earnings|discretionary\\s*earnings|net\\s*profit)${SEP}\\$\\s*${AMOUNT}`, "i"),
+  revenueT12: new RegExp(`(?:gross\\s*revenue|revenue|gross\\s*sales|annual\\s*sales|sales|gross\\s*income|(?:business\\s*)?making)${SEP}\\$\\s*${AMOUNT}`, "i"),
 };
 const ESTABLISHED_RE = /(?:established|est\.?|founded)\s*(?:in\s*)?[:\-–]?\s*((?:19|20)\d{2})/i;
 // "City, ST" or "City Name, Texas" — every word must be capitalized so lead-ins
@@ -200,6 +206,15 @@ export function extractFields(text) {
   for (const [k, re] of Object.entries(FIELDS)) {
     const m = text.match(re);
     if (m) out[k] = parseMoney(m[1]);
+  }
+  // Cards often show one bare price with no label ("Austin, TX · $675,000").
+  // If NOTHING was labeled and there is exactly one money amount, it's the
+  // asking price; with several unlabeled amounts we stay at "Not stated"
+  // rather than guess.
+  if (out.asking == null && out.sde == null && out.revenueT12 == null) {
+    const monies = text.match(/\$\s*[\d.,]+\s*(?:million|mil\b|mm\b|thousand|[kKmM])?/gi) || [];
+    const parsed = [...new Set(monies.map((t) => parseMoney(t)).filter(Boolean))];
+    if (parsed.length === 1) out.asking = parsed[0];
   }
   const est = text.match(ESTABLISHED_RE);
   if (est) out.established = Number(est[1]);
@@ -504,7 +519,10 @@ function parseDdgHtml(html, src) {
 }
 
 const note = (attempts, via, url, r, found) =>
-  attempts.push({ via, url, httpStatus: r.status, found, sample: (r.body || r.error || "").slice(0, 160) });
+  attempts.push({
+    via, url, httpStatus: r.status, found,
+    sample: (r.body || r.error || "").slice(0, via === "jina-reader" ? 900 : 160),
+  });
 
 async function scanSearchIndex(src, keyword, location, page, attempts) {
   const q = `site:${src.scope} ${keyword} ${location || ""} for sale`.trim();

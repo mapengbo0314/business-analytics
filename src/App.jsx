@@ -410,6 +410,7 @@ function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, on
       <div style={{ fontFamily: T.mono, fontSize: 10.5, letterSpacing: 1.5, color: stageColor(stage) }}>
         PIPELINE — {STAGE_NEXT[stage]}
         {daysIn != null && daysIn > 0 ? ` · ${daysIn}d in stage` : ""}
+        {d.starredBy ? ` · ★ ${d.starredBy}` : ""}
       </div>
       <div className="flex flex-wrap gap-1.5 mt-2">
         {STAGES.map((s) => {
@@ -880,26 +881,47 @@ export default function App() {
     [store.saved, criteria]
   );
 
-  const toggleSave = (d) => {
+  // Starring asks who's doing it (shared pipeline = teammates need attribution).
+  const [starPrompt, setStarPrompt] = useState(null);
+  const [starName, setStarName] = useState(() => {
+    try { return localStorage.getItem("dealflow-user-v1") || ""; } catch (e) { return ""; }
+  });
+
+  const doSave = (d, name) => {
     const k = canon(d);
     const next = { ...store, saved: { ...store.saved } };
-    const removing = !!next.saved[k];
-    if (removing) delete next.saved[k];
-    else {
-      const { checks, score, mult, margin, age, ...snapshot } = d;
-      next.saved[k] = { ...snapshot, savedOn: TODAY, stage: "watching", stageAt: Date.now(), notes: "" };
-    }
+    const { checks, score, mult, margin, age, ...snapshot } = d;
+    next.saved[k] = {
+      ...snapshot, savedOn: TODAY, stage: "watching", stageAt: Date.now(), notes: "",
+      starredBy: name || null,
+    };
     persist(next);
     if (shared) {
-      (removing
-        ? fetch(`/api/saved?url=${encodeURIComponent(k)}`, { method: "DELETE" })
-        : fetch("/api/saved", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ deal: next.saved[k] }),
-          })
-      ).catch(() => {});
+      fetch("/api/saved", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deal: next.saved[k] }),
+      }).catch(() => {});
     }
+  };
+
+  const toggleSave = (d) => {
+    const k = canon(d);
+    if (store.saved[k]) {
+      const next = { ...store, saved: { ...store.saved } };
+      delete next.saved[k];
+      persist(next);
+      if (shared) fetch(`/api/saved?url=${encodeURIComponent(k)}`, { method: "DELETE" }).catch(() => {});
+      return;
+    }
+    setStarPrompt(d); // ask who's starring before saving
+  };
+
+  const confirmStar = () => {
+    const name = starName.trim();
+    try { localStorage.setItem("dealflow-user-v1", name); } catch (e) { /* private mode */ }
+    doSave(starPrompt, name || "Someone");
+    setStarPrompt(null);
   };
   // Patch a saved deal (stage/notes) and sync it to the shared store.
   const updateSaved = (k, patch) => {
@@ -1241,6 +1263,29 @@ export default function App() {
           )}
         </section>
       </main>
+
+      {starPrompt && (
+        <div className="fixed inset-0 flex items-center justify-center p-4" style={{ background: "rgba(28,43,37,0.5)" }}
+          role="dialog" aria-modal="true" aria-label="Who is starring this deal">
+          <div className="w-full max-w-sm rounded-lg p-5" style={{ background: T.surface }}>
+            <div style={{ fontFamily: T.mono, fontSize: 11, letterSpacing: 2, color: T.green }}>
+              WHO'S STARRING THIS?
+            </div>
+            <h3 style={{ fontFamily: T.display, fontSize: 17, margin: "6px 0 10px" }}>{starPrompt.name}</h3>
+            <input value={starName} onChange={(e) => setStarName(e.target.value)} autoFocus
+              onKeyDown={(e) => e.key === "Enter" && confirmStar()}
+              placeholder="Your name — shown to the team on this deal"
+              className="w-full rounded-md px-3 py-2"
+              style={{ border: `1px solid ${T.line}`, fontSize: 13, fontFamily: T.body, color: T.ink, background: T.bg }} />
+            <div className="flex justify-end gap-2 mt-3">
+              <button onClick={() => setStarPrompt(null)} className="px-3 py-1.5 rounded-md text-sm"
+                style={{ border: `1px solid ${T.line}`, color: T.inkSoft, background: "transparent" }}>Cancel</button>
+              <button onClick={confirmStar} className="px-4 py-1.5 rounded-md text-sm font-semibold"
+                style={{ background: T.green, color: "#fff" }}>★ Star deal</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {emailDeal && (
         <div className="fixed inset-0 flex items-center justify-center p-4" style={{ background: "rgba(28,43,37,0.5)" }}
