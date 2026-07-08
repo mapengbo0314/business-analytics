@@ -636,18 +636,49 @@ async function jinaBingSerp(src, keyword, location, page, attempts) {
   return listings;
 }
 
-// DuckDuckGo HTML site-search — proven to work from datacenter IPs and is
-// keyword+location scoped, so results need no keyword post-filter. Primary path
-// for every source.
+// DuckDuckGo LITE results — simpler HTML, separate rate-limit bucket from the
+// html endpoint. Links carry class="result-link"; snippets follow in a
+// result-snippet cell. Redirects unwrap via unwrapRedirect (uddg=).
+function parseDdgLite(html, src) {
+  const items = [];
+  const dre = src.detailRe || src.linkRe;
+  // Attribute order varies (href before or after class), so match the whole
+  // result-link anchor tag and pull href out of its attributes.
+  const re = /<a\b([^>]*\bresult-link\b[^>]*)>([\s\S]*?)<\/a>([\s\S]*?)(?=<a\b[^>]*\bresult-link|$)/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const hrefM = m[1].match(/href="([^"]+)"/i);
+    if (!hrefM) continue;
+    const href = unwrapRedirect(decodeEntities(hrefM[1]));
+    if ((dre && !dre.test(href)) || !isDetail(href, src)) continue;
+    const name = cleanName(m[2]);
+    if (!name) continue;
+    const snip = m[3].match(/class="[^"]*result-snippet[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
+    items.push(makeListing(src, name, href, `${stripTags(m[2])} ${snip ? stripTags(snip[1]) : ""}`));
+  }
+  return dedupeByUrl(items);
+}
+
+// DuckDuckGo site-search — proven to work from datacenter IPs and keyword+
+// location scoped, so results need no keyword post-filter. Primary path for
+// every source. Tries the html endpoint, then the lite endpoint on
+// throttle/empty (they rate-limit independently).
 async function ddgSiteSearch(src, keyword, location, page, attempts) {
   const scope = src.scope || src.domain;
   if (!scope) return [];
   const q = `site:${scope} ${keyword || ""} ${location || ""} for sale`.trim();
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}${page > 1 ? `&s=${(page - 1) * 10}` : ""}`;
-  const r = await fetchPage(url);
-  const listings = r.status === 200 ? parseDdgHtml(r.body, src) : [];
-  note(attempts, "ddg-html", url, r, listings.length);
-  return listings;
+
+  const htmlUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}${page > 1 ? `&s=${(page - 1) * 10}` : ""}`;
+  const rh = await fetchPage(htmlUrl);
+  const htmlListings = rh.status === 200 ? parseDdgHtml(rh.body, src) : [];
+  note(attempts, "ddg-html", htmlUrl, rh, htmlListings.length);
+  if (htmlListings.length) return htmlListings;
+
+  const liteUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}${page > 1 ? `&s=${(page - 1) * 10}` : ""}`;
+  const rl = await fetchPage(liteUrl);
+  const liteListings = rl.status === 200 ? parseDdgLite(rl.body, src) : [];
+  note(attempts, "ddg-lite", liteUrl, rl, liteListings.length);
+  return liteListings;
 }
 
 async function scanSearchIndex(src, keyword, location, page, attempts) {
