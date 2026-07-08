@@ -1,0 +1,27 @@
+name: scrape-diag
+on:
+  workflow_dispatch:
+    inputs:
+      keyword:
+        description: "Search keyword"
+        default: "HVAC"
+        required: false
+      location:
+        description: "Location"
+        default: "Texas"
+        required: false
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run scraper diagnostics against live sites
+        env:
+          DIAG_KEYWORD: ${{ inputs.keyword }}
+          DIAG_LOCATION: ${{ inputs.location }}
+        run: node scripts/scrape-diag.mjs
