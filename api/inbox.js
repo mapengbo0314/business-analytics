@@ -25,6 +25,10 @@ const gmailConfigured = () => !!(process.env.GMAIL_USER && process.env.GMAIL_APP
 const blobConfigured = () => !!process.env.BLOB_READ_WRITE_TOKEN;
 const enabled = () => gmailConfigured() && redisConfigured();
 
+// Test seams: harnesses inject fake parsed emails / a fake attachment uploader
+// so the full receive path runs without IMAP or Blob network access.
+export const _test = { fetchEmails: null, upload: null };
+
 const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
 
 // Match an email to exactly one pipeline deal — by quoted listing URL or by the
@@ -80,6 +84,7 @@ async function applyToDeal(saved, dealKey, email) {
 }
 
 async function uploadAttachments(parsed) {
+  if (_test.upload) return _test.upload(parsed);
   const files = [];
   if (!blobConfigured()) return files;
   const { put } = await import("@vercel/blob");
@@ -98,6 +103,39 @@ async function uploadAttachments(parsed) {
 
 async function syncInbox() {
   const user = process.env.GMAIL_USER;
+  const result = { checked: 0, matched: 0, unmatched: 0 };
+  const saved = await loadSaved();
+
+  // Shared per-message pipeline: match → attach docs/notes → or queue unmatched.
+  const handleParsed = async (parsed, uid) => {
+    const fromAddr = (parsed.from && parsed.from.value && parsed.from.value[0] && parsed.from.value[0].address) || "";
+    if (fromAddr.toLowerCase() === user.toLowerCase()) return; // our own sends
+    result.checked++;
+    const email = {
+      id: `em-${uid}-${Date.now()}`,
+      at: parsed.date ? new Date(parsed.date).getTime() : Date.now(),
+      from: fromAddr,
+      subject: parsed.subject || "(no subject)",
+      snippet: String(parsed.text || "").replace(/\s+/g, " ").trim().slice(0, 300),
+      files: await uploadAttachments(parsed),
+    };
+    const dealKey = matchDealKey(saved, { subject: parsed.subject, text: parsed.text });
+    if (dealKey && (await applyToDeal(saved, dealKey, email))) {
+      result.matched++;
+    } else {
+      await redis(["LPUSH", UNMATCHED_KEY, JSON.stringify(email)]);
+      result.unmatched++;
+    }
+  };
+
+  if (_test.fetchEmails) {
+    const fakes = (await _test.fetchEmails()) || [];
+    let i = 0;
+    for (const parsed of fakes) await handleParsed(parsed, `fake-${++i}`);
+    await redis(["LTRIM", UNMATCHED_KEY, "0", "49"]);
+    return result;
+  }
+
   const client = new ImapFlow({
     host: "imap.gmail.com",
     port: 993,
@@ -105,7 +143,6 @@ async function syncInbox() {
     auth: { user, pass: process.env.GMAIL_APP_PASSWORD },
     logger: false,
   });
-  const result = { checked: 0, matched: 0, unmatched: 0 };
   await client.connect();
   const lock = await client.getMailboxLock("INBOX");
   try {
@@ -116,33 +153,12 @@ async function syncInbox() {
       .slice(-15); // newest 15 per sync — the 5h cadence keeps up
     if (!uids.length) return result;
 
-    const saved = await loadSaved();
     let maxUid = lastUid;
     for (const uid of uids) {
       maxUid = Math.max(maxUid, uid);
       const msg = await client.fetchOne(uid, { source: true }, { uid: true });
       if (!msg || !msg.source) continue;
-      const parsed = await simpleParser(msg.source);
-      const fromAddr = (parsed.from && parsed.from.value && parsed.from.value[0] && parsed.from.value[0].address) || "";
-      if (fromAddr.toLowerCase() === user.toLowerCase()) continue; // our own sends
-      result.checked++;
-
-      const email = {
-        id: `em-${uid}-${Date.now()}`,
-        at: parsed.date ? new Date(parsed.date).getTime() : Date.now(),
-        from: fromAddr,
-        subject: parsed.subject || "(no subject)",
-        snippet: String(parsed.text || "").replace(/\s+/g, " ").trim().slice(0, 300),
-        files: await uploadAttachments(parsed),
-      };
-
-      const dealKey = matchDealKey(saved, { subject: parsed.subject, text: parsed.text });
-      if (dealKey && (await applyToDeal(saved, dealKey, email))) {
-        result.matched++;
-      } else {
-        await redis(["LPUSH", UNMATCHED_KEY, JSON.stringify(email)]);
-        result.unmatched++;
-      }
+      await handleParsed(await simpleParser(msg.source), uid);
     }
     await redis(["LTRIM", UNMATCHED_KEY, "0", "49"]);
     await redis(["SET", LAST_UID_KEY, String(maxUid)]);

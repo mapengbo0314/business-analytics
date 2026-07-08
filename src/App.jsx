@@ -379,6 +379,7 @@ function UnmatchedEmail({ e, deals, onAssign, onDismiss }) {
 
 function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, onDD, analyzeEnabled, onReport }) {
   const [copied, setCopied] = useState(null);
+  const [attachNames, setAttachNames] = useState([]);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeErr, setAnalyzeErr] = useState(null);
 
@@ -433,7 +434,7 @@ function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, on
         </div>
       )}
       <DocsSection d={d} docsEnabled={docsEnabled} onFiles={onFiles} />
-      <textarea key={canon(d)} defaultValue={d.notes || ""} rows={2}
+      <textarea key={`${canon(d)}:${(d.notes || "").length}`} defaultValue={d.notes || ""} rows={2}
         placeholder="Shared notes — broker contact, docs received, DD findings, red flags…"
         onBlur={(e) => e.target.value !== (d.notes || "") && onNotes(e.target.value)}
         className="w-full rounded-md p-2 mt-2"
@@ -461,18 +462,35 @@ function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, on
       <div className="flex flex-wrap items-center gap-2 mt-1">
         <button
           onClick={async () => {
-            const text = ddPrompt(d, criteria); // build before onDD stamps ddAt
+            // Server builds the complete prompt — deal + buy box + notes/email
+            // history + inlined text docs; ddPrompt is the offline fallback.
+            let text, attach = [];
+            try {
+              const r = await fetch("/api/prompt", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ deal: d, criteria }),
+              });
+              const data = await r.json();
+              if (!r.ok || !data.prompt) throw new Error("prompt endpoint unavailable");
+              text = data.prompt;
+              attach = data.attach || [];
+            } catch (e) {
+              text = ddPrompt(d, criteria);
+              attach = (d.files || []).map((f) => f.name);
+            }
             if (await copyText(text)) {
               onDD();
+              setAttachNames(attach);
               setCopied("dd");
-              setTimeout(() => setCopied(null), 3000);
+              setTimeout(() => setCopied(null), 5000);
             }
           }}
           className="px-3 py-1.5 rounded-md text-sm"
           style={{ border: `1px solid ${T.brass}`, color: copied === "dd" ? T.green : T.brass, background: "transparent", fontWeight: 600 }}>
           {copied === "dd"
-            ? "✓ Copied — paste into claude.ai with the docs attached"
-            : d.ddAt ? "⧉ Copy full DD prompt again" : "⧉ Copy due-diligence prompt for Claude"}
+            ? "✓ Copied — paste into claude.ai"
+            : d.ddAt ? "⧉ Copy research prompt again" : "⧉ Copy research prompt for Claude — everything included"}
         </button>
         {d.ddAt && (
           <button
@@ -495,6 +513,11 @@ function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, on
           </span>
         )}
       </div>
+      {copied === "dd" && attachNames.length > 0 && (
+        <div style={{ fontFamily: T.mono, fontSize: 11.5, color: T.brass, marginTop: 4 }}>
+          ⚠ Also attach these files in claude.ai: {attachNames.join(", ")}
+        </div>
+      )}
     </div>
   );
 }
@@ -904,12 +927,24 @@ export default function App() {
   const openEmail = (d) => { setEmailDeal(d); setDraft(draftEmail(d)); setEmailTo(""); setEmailErr(null); };
 
   const afterInquirySent = (d) => {
-    persist({ ...store, sent: { ...store.sent, [canon(d)]: TODAY } });
-    const saved = store.saved[canon(d)];
+    // Single composed update — two sequential persist() calls would clobber
+    // each other via the stale `store` closure.
+    const k = canon(d);
+    const saved = store.saved[k];
     const rank = (id) => STAGES.findIndex((s) => s.id === id);
+    const next = { ...store, sent: { ...store.sent, [k]: TODAY } };
     if (saved && rank(saved.stage || "watching") < rank("inquired")) {
-      updateSaved(canon(d), { stage: "inquired", stageAt: Date.now() });
+      const deal = { ...saved, stage: "inquired", stageAt: Date.now() };
+      next.saved = { ...store.saved, [k]: deal };
+      if (shared) {
+        fetch("/api/saved", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deal }),
+        }).catch(() => {});
+      }
     }
+    persist(next);
     setEmailDeal(null);
   };
   const sendViaMailApp = () => {

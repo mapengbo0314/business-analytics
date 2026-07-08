@@ -12,6 +12,9 @@ import nodemailer from "nodemailer";
 const enabled = () => !!(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
+// Test seam: harnesses inject a fake transport here instead of real SMTP.
+export const _test = { transport: null };
+
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
@@ -31,12 +34,14 @@ export default async function handler(req, res) {
   if (!subject || !body) return res.status(400).json({ error: "subject and body required" });
 
   try {
-    const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
-      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
-    });
+    const transporter =
+      _test.transport ||
+      nodemailer.createTransport({
+        host: "smtp.gmail.com",
+        port: 465,
+        secure: true,
+        auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+      });
     const info = await transporter.sendMail({
       from: process.env.GMAIL_USER,
       to: String(to).trim(),
