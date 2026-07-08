@@ -322,6 +322,39 @@ function looksLikeDetail(u) {
 // that the generic heuristic would reject).
 const isDetail = (u, src) => looksLikeDetail(u) || !!(src && src.detailOk && src.detailOk.test(u));
 
+// Search engines wrap result links in redirects — Bing: /ck/a?u=a1<base64url>,
+// DDG: ?uddg=<encoded>. Unwrap to the real marketplace URL before matching.
+export function unwrapRedirect(href) {
+  try {
+    const u = new URL(href);
+    if (/(^|\.)bing\.com$/i.test(u.hostname) && u.pathname.startsWith("/ck")) {
+      const p = u.searchParams.get("u");
+      if (p && p.startsWith("a1")) {
+        const b64 = p.slice(2).replace(/-/g, "+").replace(/_/g, "/");
+        const pad = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+        const decoded = Buffer.from(pad, "base64").toString("utf8");
+        if (/^https?:\/\//i.test(decoded)) return decoded;
+      }
+    }
+    const uddg = u.searchParams.get("uddg");
+    if (uddg) return decodeURIComponent(uddg);
+  } catch { /* not a URL or not a redirect — use as-is */ }
+  return href;
+}
+
+// "profitable-austin-area-hvac" -> "Profitable Austin Area Hvac"
+function nameFromSlug(url) {
+  try {
+    const segs = new URL(url).pathname.split("/").filter(Boolean);
+    const slug = (segs.reverse().find((x) => /[a-z]-[a-z]/i.test(x)) || "").replace(/\.aspx$/i, "");
+    const words = slug.split("-").filter((w) => w && !/^\d+$/.test(w));
+    if (words.length < 3) return null;
+    return words.map((w) => w[0].toUpperCase() + w.slice(1)).join(" ").slice(0, 120);
+  } catch {
+    return null;
+  }
+}
+
 // Hard location filter: sources return nationwide results no matter what the
 // query asks for, so when a location is set, a listing must actually mention it.
 const STATE_ABBR = {
@@ -455,7 +488,7 @@ export function extractFromHtml(html, baseUrl, linkRe, src) {
     const a = anchors[i];
     let abs, path;
     try {
-      abs = new URL(decodeEntities(a.href), baseUrl);
+      abs = new URL(unwrapRedirect(new URL(decodeEntities(a.href), baseUrl).href));
       path = abs.pathname;
     } catch {
       continue;
@@ -479,7 +512,7 @@ export function extractFromMarkdown(md, linkRe, src) {
   const linkMd = /\[([^\]]{3,300}?)\]\((https?:\/\/[^)\s]+)\)/g;
   const matches = [];
   let m;
-  while ((m = linkMd.exec(md))) matches.push({ text: m[1], url: m[2], index: m.index });
+  while ((m = linkMd.exec(md))) matches.push({ text: m[1], url: unwrapRedirect(m[2]), index: m.index });
   for (let i = 0; i < matches.length; i++) {
     const a = matches[i];
     let path;
@@ -498,6 +531,27 @@ export function extractFromMarkdown(md, linkRe, src) {
       .replace(/[\\*_#>|\[\]()]/g, " ")
       .replace(/\s+/g, " ");
     items.push(makeListing(src, name, a.url, windowText));
+  }
+  if (items.length) return dedupeByUrl(items);
+
+  // No markdown-syntax links matched — some renders list bare URLs instead.
+  // Extract those, deriving a name from the URL slug.
+  const bare = [...md.matchAll(/https?:\/\/[^\s)\]"'<>]+/g)];
+  for (let i = 0; i < bare.length; i++) {
+    const url = unwrapRedirect(bare[i][0].replace(/[.,;:]+$/, ""));
+    let path;
+    try {
+      path = new URL(url).pathname;
+    } catch {
+      continue;
+    }
+    if (!(linkRe.test(path) || linkRe.test(url))) continue;
+    if (!isDetail(url, src)) continue;
+    const name = nameFromSlug(url);
+    if (!name) continue;
+    const end = i + 1 < bare.length ? bare[i + 1].index : bare[i].index + 1500;
+    const windowText = md.slice(bare[i].index, Math.min(end, bare[i].index + 1500)).replace(/[\\*_#>|\[\]()]/g, " ").replace(/\s+/g, " ");
+    items.push(makeListing(src, name, url, windowText));
   }
   return dedupeByUrl(items);
 }
