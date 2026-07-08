@@ -14,6 +14,40 @@
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
+// URL helpers — every source's browse pages are slug-based (verified against
+// real indexed URLs), e.g. bizbuysell.com/texas/hvac-businesses-for-sale/.
+const kwSlug = (s) =>
+  String(s || "").toLowerCase().trim().replace(/[^a-z0-9 ]+/g, "").replace(/\s+/g, "-");
+
+const STATE_NAMES = [
+  "alabama","alaska","arizona","arkansas","california","colorado","connecticut","delaware","florida",
+  "georgia","hawaii","idaho","illinois","indiana","iowa","kansas","kentucky","louisiana","maine",
+  "maryland","massachusetts","michigan","minnesota","mississippi","missouri","montana","nebraska",
+  "nevada","new hampshire","new jersey","new mexico","new york","north carolina","north dakota","ohio",
+  "oklahoma","oregon","pennsylvania","rhode island","south carolina","south dakota","tennessee","texas",
+  "utah","vermont","virginia","washington","west virginia","wisconsin","wyoming",
+];
+const ABBR_TO_NAME = {
+  al:"alabama",ak:"alaska",az:"arizona",ar:"arkansas",ca:"california",co:"colorado",ct:"connecticut",
+  de:"delaware",fl:"florida",ga:"georgia",hi:"hawaii",id:"idaho",il:"illinois",in:"indiana",ia:"iowa",
+  ks:"kansas",ky:"kentucky",la:"louisiana",me:"maine",md:"maryland",ma:"massachusetts",mi:"michigan",
+  mn:"minnesota",ms:"mississippi",mo:"missouri",mt:"montana",ne:"nebraska",nv:"nevada",nh:"new hampshire",
+  nj:"new jersey",nm:"new mexico",ny:"new york",nc:"north carolina",nd:"north dakota",oh:"ohio",
+  ok:"oklahoma",or:"oregon",pa:"pennsylvania",ri:"rhode island",sc:"south carolina",sd:"south dakota",
+  tn:"tennessee",tx:"texas",ut:"utah",vt:"vermont",va:"virginia",wa:"washington",wv:"west virginia",
+  wi:"wisconsin",wy:"wyoming",
+};
+// "Texas" / "TX" → "texas"; cities and anything else → null (the post-scan
+// location filter still applies — the URL just stays un-scoped).
+export function stateSlug(loc) {
+  const l = String(loc || "").trim().toLowerCase();
+  if (!l) return null;
+  if (STATE_NAMES.includes(l)) return l.replace(/ /g, "-");
+  if (ABBR_TO_NAME[l]) return ABBR_TO_NAME[l].replace(/ /g, "-");
+  return null;
+}
+const pageQ = (page) => (page > 1 ? `?page=${page}` : "");
+
 export const SOURCES = {
   bizbuysell: {
     label: "BizBuySell",
@@ -21,10 +55,13 @@ export const SOURCES = {
     domain: "bizbuysell.com",
     scope: "bizbuysell.com/business-opportunity",
     detailRe: /bizbuysell\.com\/(?:business-opportunity|business-auction)\//i,
-    pageUrl: (kw, loc, page) =>
-      kw
-        ? `https://www.bizbuysell.com/businesses-for-sale/?q=${encodeURIComponent(kw)}${page > 1 ? `&page=${page}` : ""}`
-        : `https://www.bizbuysell.com/businesses-for-sale/${page > 1 ? `?page=${page}` : ""}`,
+    // Real format: bizbuysell.com/{state}/{kw}-businesses-for-sale/
+    pageUrl: (kw, loc, page) => {
+      const st = stateSlug(loc);
+      const k = kwSlug(kw);
+      const path = `${st ? `${st}/` : ""}${k ? `${k}-` : ""}businesses-for-sale/`;
+      return `https://www.bizbuysell.com/${path}${pageQ(page)}`;
+    },
   },
   businessesforsale: {
     label: "BusinessesForSale.com",
@@ -39,38 +76,58 @@ export const SOURCES = {
     label: "BizQuest",
     kind: "search-index",
     domain: "bizquest.com",
-    scope: "bizquest.com",
-    detailRe: /bizquest\.com\/[a-z0-9-]*business[^\s"']*/i,
-    pageUrl: (kw) => `https://www.bizquest.com/businesses-for-sale/?keyword=${encodeURIComponent(kw)}`,
+    scope: "bizquest.com/business-for-sale",
+    detailRe: /bizquest\.com\/business-for-sale\//i,
+    // Real format: bizquest.com/{kw}-businesses-for-sale-in-{state}/
+    pageUrl: (kw, loc, page) => {
+      const st = stateSlug(loc);
+      const k = kwSlug(kw);
+      let path;
+      if (k && st) path = `${k}-businesses-for-sale-in-${st}`;
+      else if (k) path = `${k}-businesses-for-sale`;
+      else if (st) path = `${st}-businesses-for-sale`;
+      else path = "businesses-for-sale";
+      return `https://www.bizquest.com/${path}/${pageQ(page)}`;
+    },
   },
   dealstream: {
     label: "DealStream",
     kind: "direct",
-    searchUrl: (kw, loc, page) =>
-      kw || loc
-        ? `https://dealstream.com/search?q=${encodeURIComponent([kw, loc].filter(Boolean).join(" "))}${
-            page > 1 ? `&page=${page}` : ""
-          }`
-        : `https://dealstream.com/businesses-for-sale${page > 1 ? `?page=${page}` : ""}`,
-    linkRe: /^\/[a-z0-9][a-z0-9-]{13,}\/?$/i,
+    // Real formats: dealstream.com/{state}/{kw}-businesses-for-sale (browse)
+    // and dealstream.com/d/biz-sale/{cat}/{slug} (detail)
+    searchUrl: (kw, loc, page) => {
+      const st = stateSlug(loc);
+      const k = kwSlug(kw);
+      return `https://dealstream.com/${st ? `${st}/` : ""}${k ? `${k}-` : ""}businesses-for-sale${pageQ(page)}`;
+    },
+    linkRe: /\/d\/[a-z0-9-]+/i,
+    detailOk: /\/d\//i, // short slugs, no digits — bypass the generic detail heuristic
   },
   businessbroker: {
     label: "BusinessBroker.net",
     kind: "direct",
-    searchUrl: (kw, loc, page) =>
-      kw
-        ? `https://www.businessbroker.net/listings/searchresults.aspx?kw=${encodeURIComponent(kw)}${
-            page > 1 ? `&pg=${page}` : ""
-          }`
-        : `https://www.businessbroker.net/listings/${page > 1 ? `?pg=${page}` : ""}`,
-    linkRe: /(business-opportunity|business-for-sale|\/\d{5,}\.aspx$)/i,
+    // Real formats: /state/{state}-businesses-for-sale.aspx (browse) and
+    // /business-for-sale/{slug}/{id}.aspx (detail). No keyword browse URL —
+    // listings are keyword-filtered after extraction (kwFilter).
+    searchUrl: (kw, loc, page) => {
+      const st = stateSlug(loc);
+      return st
+        ? `https://www.businessbroker.net/state/${st}-businesses-for-sale.aspx${pageQ(page)}`
+        : `https://www.businessbroker.net/${pageQ(page)}`;
+    },
+    linkRe: /business-for-sale\//i,
+    kwFilter: true,
   },
   synergybb: {
     label: "Synergy Business Brokers",
     kind: "direct",
-    searchUrl: (kw) =>
-      kw ? `https://www.synergybb.com/?s=${encodeURIComponent(kw)}` : "https://www.synergybb.com/businesses-for-sale/",
+    // Real format: synergybb.com/businesses-for-sale/{state}/ (browse).
+    searchUrl: (kw, loc, page) => {
+      const st = stateSlug(loc);
+      return `https://synergybb.com/businesses-for-sale/${st ? `${st}/` : ""}${pageQ(page)}`;
+    },
     linkRe: /(businesses?-for-sale|listings?)\/[a-z0-9-]{8,}/i,
+    kwFilter: true,
   },
 };
 
@@ -196,13 +253,19 @@ function cleanName(s) {
 function looksLikeDetail(u) {
   try {
     const path = new URL(u).pathname.replace(/\/+$/, "");
-    if (/\d{5,}/.test(path)) return true;
     const last = (path.split("/").pop() || "").replace(/\.aspx$/i, "");
+    // browse/category pages ("hvac-businesses-for-sale-in-texas") are never listings
+    if (/businesses-for-sale/.test(last)) return false;
+    if (/\d{5,}/.test(path)) return true;
     return last.length >= 18 && last.includes("-");
   } catch {
     return false;
   }
 }
+
+// A source can mark its own detail-URL shape (e.g. DealStream's short /d/ slugs
+// that the generic heuristic would reject).
+const isDetail = (u, src) => looksLikeDetail(u) || !!(src && src.detailOk && src.detailOk.test(u));
 
 // Hard location filter: sources return nationwide results no matter what the
 // query asks for, so when a location is set, a listing must actually mention it.
@@ -343,7 +406,7 @@ export function extractFromHtml(html, baseUrl, linkRe, src) {
       continue;
     }
     if (!(linkRe.test(path) || linkRe.test(abs.href))) continue;
-    if (!looksLikeDetail(abs.href)) continue;
+    if (!isDetail(abs.href, src)) continue;
     const name = cleanName(a.inner);
     if (!name) continue;
     const end = i + 1 < anchors.length ? anchors[i + 1].index : a.index + 3000;
@@ -371,7 +434,7 @@ export function extractFromMarkdown(md, linkRe, src) {
       continue;
     }
     if (!(linkRe.test(path) || linkRe.test(a.url))) continue;
-    if (!looksLikeDetail(a.url)) continue;
+    if (!isDetail(a.url, src)) continue;
     const name = cleanName(a.text.replace(/!\[[^\]]*\]/g, " "));
     if (!name) continue;
     const end = i + 1 < matches.length ? matches[i + 1].index : a.index + 2500;
@@ -399,7 +462,7 @@ function parseBingRss(xml, src) {
     const link = pick("link");
     const title = stripTags(pick("title"));
     const desc = stripTags(pick("description"));
-    if (!link || !src.detailRe.test(link) || !looksLikeDetail(link)) continue;
+    if (!link || !src.detailRe.test(link) || !isDetail(link, src)) continue;
     const name = cleanName(title.replace(new RegExp(`\\s*[-|·]\\s*${src.label}.*$`, "i"), "")) || cleanName(title);
     if (!name) continue;
     items.push(makeListing(src, name, link, `${title} ${desc}`));
@@ -415,7 +478,7 @@ function parseDdgHtml(html, src) {
     let href = decodeEntities(m[1]);
     const uddg = href.match(/[?&]uddg=([^&]+)/);
     if (uddg) href = decodeURIComponent(uddg[1]);
-    if (!src.detailRe.test(href) || !looksLikeDetail(href)) continue;
+    if (!src.detailRe.test(href) || !isDetail(href, src)) continue;
     const name = cleanName(m[2]);
     if (!name) continue;
     const snippetMatch = m[3].match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div|span)>/i);
@@ -500,8 +563,20 @@ export async function scanSource(siteId, keyword, location = "", page = 1, debug
         : await scanSearchIndex(src, keyword, location, page, attempts);
     const before = r.listings.length;
     r.listings = r.listings.filter((l) => locationMatches(l, location));
-    if (r.status === "ok" && !r.listings.length) r.status = "empty";
     if (debug) r.droppedByLocation = before - r.listings.length;
+    // Sources whose browse pages can't carry the keyword in the URL list every
+    // industry — keep only listings that actually mention the keyword.
+    if (keyword && src.kwFilter) {
+      const words = String(keyword).toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+      if (words.length) {
+        const beforeKw = r.listings.length;
+        r.listings = r.listings.filter((l) =>
+          words.some((w) => `${l.name} ${l.note}`.toLowerCase().includes(w))
+        );
+        if (debug) r.droppedByKeyword = beforeKw - r.listings.length;
+      }
+    }
+    if (r.status === "ok" && !r.listings.length) r.status = "empty";
     return { site: siteId, label: src.label, ...r, ...(debug ? { attempts } : {}) };
   } catch (err) {
     return {
