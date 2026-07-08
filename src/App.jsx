@@ -13,7 +13,7 @@ const T = {
 
 const STORAGE_KEY = "dealflow-state-v1";
 const SITES_KEY = "dealflow-sites-v1";
-const POOL_KEY = "dealflow-pool-v2";
+const POOL_KEY = "dealflow-pool-v3"; // bump to force a fresh auto-scan after scraper fixes
 // Mirrors api/_lib/scrape.js — the big marketplaces are read via public search
 // indexes (their own pages block server-side bots); the rest are scraped directly.
 const SOURCES = [
@@ -23,6 +23,7 @@ const SOURCES = [
   { id: "dealstream", label: "DealStream" },
   { id: "businessbroker", label: "BusinessBroker.net" },
   { id: "synergybb", label: "Synergy Business Brokers" },
+  { id: "sunbelt", label: "Sunbelt Network" },
 ];
 const REFRESH_MS = 5 * 60 * 60 * 1000; // 5 hours — matches the server-side cache & cron
 const TODAY = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });

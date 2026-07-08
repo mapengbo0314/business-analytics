@@ -129,6 +129,21 @@ export const SOURCES = {
     linkRe: /(businesses?-for-sale|listings?)\/[a-z0-9-]{8,}/i,
     kwFilter: true,
   },
+  sunbelt: {
+    label: "Sunbelt Network",
+    kind: "direct",
+    // Real formats: /business-search/business-results/state-{state}/ (browse);
+    // details at .../listing-details/{slug}/ or /business-search/business-details/{slug}/
+    searchUrl: (kw, loc, page) => {
+      const st = stateSlug(loc);
+      return st
+        ? `https://www.sunbeltnetwork.com/business-search/business-results/state-${st}/${pageQ(page)}`
+        : `https://www.sunbeltnetwork.com/business-search/${pageQ(page)}`;
+    },
+    linkRe: /(listing-details|business-details)\//i,
+    detailOk: /(listing-details|business-details)\//i, // ID-style slugs can be short
+    kwFilter: true,
+  },
 };
 
 export const SOURCE_IDS = Object.keys(SOURCES);
@@ -510,12 +525,22 @@ async function scanSearchIndex(src, keyword, location, page, attempts) {
   if (ddgListings.length) return { status: "ok", httpStatus: 200, via: "ddg-html", listings: ddgListings };
 
   // Search engines block datacenter IPs — read the marketplace's own search page
-  // through Jina Reader instead.
-  const pageUrl = src.pageUrl(keyword, location, page);
-  const jina = await fetchViaJina(pageUrl);
-  const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.detailRe, src) : [];
-  note(attempts, "jina-reader", pageUrl, jina, jinaListings.length);
-  if (jinaListings.length) return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings };
+  // through Jina Reader instead. If the keyword-specific page yields nothing
+  // (odd keyword slugs can 404), fall back to the generic browse page and let
+  // the keyword post-filter narrow the results.
+  const pages = [src.pageUrl(keyword, location, page)];
+  if (keyword) {
+    const generic = src.pageUrl("", location, page);
+    if (generic !== pages[0]) pages.push(generic);
+  }
+  let jina = { status: 0, body: "" };
+  for (let i = 0; i < pages.length; i++) {
+    jina = await fetchViaJina(pages[i]);
+    const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.detailRe, src) : [];
+    note(attempts, "jina-reader", pages[i], jina, jinaListings.length);
+    if (jinaListings.length)
+      return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: i > 0 };
+  }
   if (jina.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
   const httpStatus = jina.status || ddg.status || bing.status || 0;
@@ -534,11 +559,21 @@ async function scanDirect(src, keyword, location, page, attempts) {
   note(attempts, "direct", url, r, directListings.length);
   if (directListings.length) return { status: "ok", httpStatus: 200, via: "direct", listings: directListings };
 
-  // Blocked, erroring, or a page we couldn't parse — retry through Jina Reader.
-  const jina = await fetchViaJina(url);
-  const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.linkRe, src) : [];
-  note(attempts, "jina-reader", url, jina, jinaListings.length);
-  if (jinaListings.length) return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings };
+  // Blocked, erroring, or a page we couldn't parse — retry through Jina Reader,
+  // falling back to the generic browse page when the keyword page yields nothing.
+  const pages = [url];
+  if (keyword) {
+    const generic = src.searchUrl("", location, page);
+    if (generic !== url) pages.push(generic);
+  }
+  let jina = { status: 0, body: "" };
+  for (let i = 0; i < pages.length; i++) {
+    jina = await fetchViaJina(pages[i]);
+    const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.linkRe, src) : [];
+    note(attempts, "jina-reader", pages[i], jina, jinaListings.length);
+    if (jinaListings.length)
+      return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: i > 0 };
+  }
   if (jina.status === 200 || r.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
   const httpStatus = jina.status || r.status || 0;
@@ -566,7 +601,7 @@ export async function scanSource(siteId, keyword, location = "", page = 1, debug
     if (debug) r.droppedByLocation = before - r.listings.length;
     // Sources whose browse pages can't carry the keyword in the URL list every
     // industry — keep only listings that actually mention the keyword.
-    if (keyword && src.kwFilter) {
+    if (keyword && (src.kwFilter || r.usedGenericPage)) {
       const words = String(keyword).toLowerCase().split(/\s+/).filter((w) => w.length > 2);
       if (words.length) {
         const beforeKw = r.listings.length;
