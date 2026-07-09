@@ -90,20 +90,8 @@ export const SOURCES = {
       return `https://www.bizquest.com/${path}/${pageQ(page)}`;
     },
   },
-  dealstream: {
-    label: "DealStream",
-    kind: "direct",
-    domain: "dealstream.com",
-    // Real formats: dealstream.com/{state}/{kw}-businesses-for-sale (browse)
-    // and dealstream.com/d/biz-sale/{cat}/{slug} (detail)
-    searchUrl: (kw, loc, page) => {
-      const st = stateSlug(loc);
-      const k = kwSlug(kw);
-      return `https://dealstream.com/${st ? `${st}/` : ""}${k ? `${k}-` : ""}businesses-for-sale${pageQ(page)}`;
-    },
-    linkRe: /\/d\/[a-z0-9-]+/i,
-    detailOk: /\/d\//i, // short slugs, no digits — bypass the generic detail heuristic
-  },
+  // (DealStream was removed: it CAPTCHA-blocks every access path we have —
+  // direct, Jina Reader, and search-index snippets — so it only ever showed 0.)
   businessbroker: {
     label: "BusinessBroker.net",
     kind: "direct",
@@ -693,11 +681,10 @@ async function scanSearchIndex(src, keyword, location, page, attempts) {
     if (listings.length) return { status: "ok", httpStatus: 200, via: "bing-rss", listings };
   } else note(attempts, "bing-rss", bingUrl, bing, 0);
 
-  const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}${page > 1 ? `&s=${(page - 1) * 10}` : ""}`;
-  const ddg = await fetchPage(ddgUrl);
-  const ddgListings = ddg.status === 200 ? parseDdgHtml(ddg.body, src) : [];
-  note(attempts, "ddg-html", ddgUrl, ddg, ddgListings.length);
-  if (ddgListings.length) return { status: "ok", httpStatus: 200, via: "ddg-html", listings: ddgListings, keywordScoped: !!keyword };
+  // DDG site-search (html endpoint, then the lite endpoint — they throttle
+  // independently, so one 202 doesn't zero the source out).
+  const ddgListings = await ddgSiteSearch(src, keyword, location, page, attempts);
+  if (ddgListings.length) return { status: "ok", httpStatus: 200, via: "ddg", listings: ddgListings, keywordScoped: !!keyword };
 
   // Search engines block datacenter IPs — read the marketplace's own search page
   // through Jina Reader instead. If the keyword-specific page yields nothing
@@ -720,7 +707,8 @@ async function scanSearchIndex(src, keyword, location, page, attempts) {
   if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp, keywordScoped: !!keyword };
   if (jina.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
-  const httpStatus = jina.status || ddg.status || bing.status || 0;
+  const lastDdg = [...attempts].reverse().find((a) => a.via.startsWith("ddg"));
+  const httpStatus = jina.status || (lastDdg && lastDdg.httpStatus) || bing.status || 0;
   return {
     status: httpStatus === 403 || httpStatus === 429 ? "blocked" : "error",
     httpStatus,

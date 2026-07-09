@@ -74,6 +74,9 @@ async function applyToDeal(saved, dealKey, email) {
   deal.notes = deal.notes ? `${deal.notes}\n${noteLine}` : noteLine;
   if (email.files && email.files.length) {
     deal.files = [...(deal.files || []), ...email.files];
+    // Docs arriving by email logs the step and advances the stage, same as a
+    // manual upload would.
+    deal.steps = { ...(deal.steps || {}), docs: (deal.steps || {}).docs || Date.now() };
     if (stageRank(deal.stage) < stageRank("docs")) {
       deal.stage = "docs";
       deal.stageAt = Date.now();

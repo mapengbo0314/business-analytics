@@ -66,8 +66,13 @@ export default async function handler(req, res) {
   }
   await storeListings(result.listings || []);
 
-  if (result.status === "ok" || result.status === "empty") {
+  if (result.status === "ok") {
     res.setHeader("Cache-Control", "public, s-maxage=18000, stale-while-revalidate=86400");
+  } else if (result.status === "empty") {
+    // A rate-limited search engine is indistinguishable from "nothing listed" —
+    // caching 0-found for 5 hours would pin a throttled source at zero, so
+    // empty results only get a short window before the edge retries.
+    res.setHeader("Cache-Control", "public, s-maxage=600, stale-while-revalidate=3600");
   } else {
     res.setHeader("Cache-Control", "no-store");
   }

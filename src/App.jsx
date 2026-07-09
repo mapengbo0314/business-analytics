@@ -13,14 +13,14 @@ const T = {
 
 const STORAGE_KEY = "dealflow-state-v1";
 const SITES_KEY = "dealflow-sites-v1";
-const POOL_KEY = "dealflow-pool-v3"; // bump to force a fresh auto-scan after scraper fixes
+const POOL_KEY = "dealflow-pool-v4"; // bump to force a fresh auto-scan after scraper fixes
 // Mirrors api/_lib/scrape.js — the big marketplaces are read via public search
 // indexes (their own pages block server-side bots); the rest are scraped directly.
+// (DealStream was dropped: it CAPTCHA-blocks every access path, so it only ever showed 0.)
 const SOURCES = [
   { id: "bizbuysell", label: "BizBuySell" },
   { id: "businessesforsale", label: "BusinessesForSale.com" },
   { id: "bizquest", label: "BizQuest" },
-  { id: "dealstream", label: "DealStream" },
   { id: "businessbroker", label: "BusinessBroker.net" },
   { id: "synergybb", label: "Synergy Business Brokers" },
   { id: "sunbelt", label: "Sunbelt Network" },
@@ -95,6 +95,22 @@ const STAGE_NEXT = {
   go: "Deal live — keep the momentum",
   passed: "Archived",
 };
+// The step log: every concrete action a buyer should take on a deal, in order.
+// Checked steps are stored on the deal as steps[id] = timestamp (shared, like
+// notes) — some check themselves off when the app does the work (send inquiry,
+// docs arriving, research prompt copied); the rest the user ticks manually.
+const STEP_LIST = [
+  { id: "read",    label: "Read the full listing — note red flags and open questions" },
+  { id: "inquire", label: "Send the inquiry from your email" },
+  { id: "form",    label: "Complete the broker's buyer profile / financial statement" },
+  { id: "nda",     label: "Sign and return the NDA" },
+  { id: "docs",    label: "Get 3 yrs P&L, tax returns, and the add-back schedule" },
+  { id: "analyze", label: "Run the Claude research prompt on the docs" },
+  { id: "call",    label: "Call the broker — walk through the open questions" },
+  { id: "visit",   label: "Visit the business in person (or take a video tour)" },
+  { id: "finance", label: "Line up financing — SBA pre-qualification / proof of funds" },
+  { id: "offer",   label: "Set your offer range and draft the LOI" },
+];
 
 // Normalize a listing from /api/scan or /api/listings into the card shape.
 const enrichListing = (p) => {
@@ -378,7 +394,41 @@ function UnmatchedEmail({ e, deals, onAssign, onDismiss }) {
   );
 }
 
-function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, onDD, analyzeEnabled, onReport }) {
+// Per-deal step log: the ordered checklist of actions to take on a deal, with
+// a date stamp on each step taken. Shared like notes — teammates see the same
+// checked boxes.
+function StepLog({ d, onStep }) {
+  const steps = d.steps || {};
+  const done = STEP_LIST.filter((s) => steps[s.id]).length;
+  const next = STEP_LIST.find((s) => !steps[s.id]);
+  const stamp = (ts) => new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return (
+    <details open={done < STEP_LIST.length} className="mt-3 rounded-md" style={{ border: `1px dashed ${T.line}`, background: T.bg }}>
+      <summary className="px-3 py-2" style={{ fontFamily: T.mono, fontSize: 10.5, letterSpacing: 1.5, color: done === STEP_LIST.length ? T.green : T.inkSoft, cursor: "pointer" }}>
+        STEP LOG — {done}/{STEP_LIST.length} STEPS TAKEN{next ? ` · next: ${next.label}` : " · all steps done ✓"}
+      </summary>
+      <div className="px-3 pb-2.5">
+        {STEP_LIST.map((s) => {
+          const ts = steps[s.id];
+          const isNext = next && next.id === s.id;
+          return (
+            <label key={s.id} className="flex items-start gap-2 mt-1.5" style={{ cursor: "pointer" }}>
+              <input type="checkbox" checked={!!ts} onChange={(e) => onStep(s.id, e.target.checked)}
+                style={{ accentColor: T.green, marginTop: 2 }} />
+              <span style={{ fontSize: 12.5, lineHeight: 1.45, color: ts ? T.inkSoft : T.ink, fontWeight: isNext ? 600 : 400 }}>
+                {ts ? <s>{s.label}</s> : s.label}
+                {ts && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.green, marginLeft: 6, whiteSpace: "nowrap" }}>✓ {stamp(ts)}</span>}
+                {isNext && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.brass, marginLeft: 6, whiteSpace: "nowrap" }}>← next</span>}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+function PipelinePanel({ d, criteria, onStage, onNotes, onStep, docsEnabled, onFiles, onDD, analyzeEnabled, onReport }) {
   const [copied, setCopied] = useState(null);
   const [attachNames, setAttachNames] = useState([]);
   const [analyzing, setAnalyzing] = useState(false);
@@ -435,6 +485,7 @@ function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, on
           ⚠ No broker docs uploaded yet — add the financials below so the due-diligence prompt has something to analyze.
         </div>
       )}
+      <StepLog d={d} onStep={onStep} />
       <DocsSection d={d} docsEnabled={docsEnabled} onFiles={onFiles} />
       <textarea key={`${canon(d)}:${(d.notes || "").length}`} defaultValue={d.notes || ""} rows={2}
         placeholder="Shared notes — broker contact, docs received, DD findings, red flags…"
@@ -524,7 +575,7 @@ function PipelinePanel({ d, criteria, onStage, onNotes, docsEnabled, onFiles, on
   );
 }
 
-function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRestore, inSeenList, pipeline, onStage, onNotes, docsEnabled, onFiles, onDD, analyzeEnabled, onReport }) {
+function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRestore, inSeenList, pipeline, onStage, onNotes, onStep, docsEnabled, onFiles, onDD, analyzeEnabled, onReport }) {
   return (
     <article className="rounded-lg p-4" style={{ background: T.surface, border: saved ? `1.5px solid ${T.green}` : `1px solid ${T.line}` }}>
       <div className="flex gap-4">
@@ -593,7 +644,7 @@ function DealCard({ d, criteria, saved, sentFlag, onEmail, onSave, onPass, onRes
             </div>
           </div>
 
-          {pipeline && <PipelinePanel d={d} criteria={criteria} onStage={onStage} onNotes={onNotes} docsEnabled={docsEnabled} onFiles={onFiles} onDD={onDD} analyzeEnabled={analyzeEnabled} onReport={onReport} />}
+          {pipeline && <PipelinePanel d={d} criteria={criteria} onStage={onStage} onNotes={onNotes} onStep={onStep} docsEnabled={docsEnabled} onFiles={onFiles} onDD={onDD} analyzeEnabled={analyzeEnabled} onReport={onReport} />}
 
           <div className="flex flex-wrap gap-2 mt-4">
             {sentFlag ? (
@@ -802,14 +853,22 @@ export default function App() {
     setScanning(true); setScanError(null);
     const nextPage = append ? page + 1 : 1;
     try {
+      // Staggered starts: DuckDuckGo throttles bursts from one IP, and firing
+      // every source at once was zeroing out sources that actually work.
       const settled = await Promise.allSettled(
-        active.map((s) => scanSite(s.id, keyword.trim(), loc.trim(), nextPage))
+        active.map((s, i) =>
+          new Promise((r) => setTimeout(r, i * 1200)).then(() => scanSite(s.id, keyword.trim(), loc.trim(), nextPage))
+        )
       );
       const batch = [];
       const status = {};
+      const okLabels = new Set(); // sources that actually returned listings this round
       settled.forEach((r, i) => {
-        if (r.status === "fulfilled") { batch.push(...r.value); status[active[i].id] = r.value.length; }
-        else { status[active[i].id] = r.reason?.siteState || "error"; }
+        if (r.status === "fulfilled") {
+          batch.push(...r.value);
+          status[active[i].id] = r.value.length;
+          if (r.value.length) okLabels.add(active[i].label);
+        } else { status[active[i].id] = r.reason?.siteState || "error"; }
       });
       setSiteStatus(status);
       setPage(nextPage);
@@ -817,8 +876,12 @@ export default function App() {
       const at = Date.now();
       setLastScanAt(at);
       setPool((prev) => {
-        // keep what we have if a refresh comes back empty (sources may be flaky)
-        const merged = batch.length ? dedupe(append ? [...prev, ...batch] : batch) : prev;
+        // Per-source merge: a source that failed or came back empty this round
+        // keeps its previous listings — one throttled search request shouldn't
+        // wipe what BizBuySell showed an hour ago. Fresh results replace old
+        // ones for the sources that did respond (dedupe keeps first = freshest).
+        const kept = prev.filter((d) => !okLabels.has(d.source));
+        const merged = batch.length ? dedupe(append ? [...prev, ...batch] : [...batch, ...kept]) : prev;
         try { localStorage.setItem(POOL_KEY, JSON.stringify({ at, deals: merged })); } catch (e) { /* private mode */ }
         return merged;
       });
@@ -956,8 +1019,13 @@ export default function App() {
     const saved = store.saved[k];
     const rank = (id) => STAGES.findIndex((s) => s.id === id);
     const next = { ...store, sent: { ...store.sent, [k]: TODAY } };
-    if (saved && rank(saved.stage || "watching") < rank("inquired")) {
-      const deal = { ...saved, stage: "inquired", stageAt: Date.now() };
+    if (saved) {
+      // Sending the inquiry logs its step automatically and advances the stage.
+      const deal = {
+        ...saved,
+        steps: { ...(saved.steps || {}), inquire: (saved.steps || {}).inquire || Date.now() },
+        ...(rank(saved.stage || "watching") < rank("inquired") ? { stage: "inquired", stageAt: Date.now() } : {}),
+      };
       next.saved = { ...store.saved, [k]: deal };
       if (shared) {
         fetch("/api/saved", {
@@ -1024,19 +1092,39 @@ export default function App() {
     onRestore: () => restore(d),
     inSeenList: !!opts.inSeenList,
     pipeline: !!opts.pipeline,
-    onStage: (stage) => updateSaved(canon(d), { stage, stageAt: Date.now() }),
+    onStage: (stage) => {
+      // Reaching a stage implies its step was taken — log it with the move.
+      const stepFor = { inquired: "inquire", form: "form", nda: "nda", docs: "docs" }[stage];
+      const patch = { stage, stageAt: Date.now() };
+      if (stepFor && !(d.steps || {})[stepFor]) patch.steps = { ...(d.steps || {}), [stepFor]: Date.now() };
+      updateSaved(canon(d), patch);
+    },
     onNotes: (notes) => updateSaved(canon(d), { notes }),
+    onStep: (stepId, on) => {
+      const steps = { ...(d.steps || {}) };
+      if (on) steps[stepId] = Date.now(); else delete steps[stepId];
+      updateSaved(canon(d), { steps });
+    },
     onFiles: (files) => {
-      // First docs arriving naturally advances the deal to "Docs received".
+      // First docs arriving naturally advances the deal to "Docs received"
+      // and logs the docs step.
       const rank = (id) => STAGES.findIndex((s) => s.id === id);
       const patch = { files };
-      if (files.length > (d.files || []).length && rank(d.stage || "watching") < rank("docs")) {
-        patch.stage = "docs";
-        patch.stageAt = Date.now();
+      if (files.length > (d.files || []).length) {
+        patch.steps = { ...(d.steps || {}), docs: (d.steps || {}).docs || Date.now() };
+        if (rank(d.stage || "watching") < rank("docs")) {
+          patch.stage = "docs";
+          patch.stageAt = Date.now();
+        }
       }
       updateSaved(canon(d), patch);
     },
-    onDD: () => updateSaved(canon(d), { ddAt: Date.now(), ddCount: (d.ddCount || 0) + 1 }),
+    onDD: () =>
+      updateSaved(canon(d), {
+        ddAt: Date.now(),
+        ddCount: (d.ddCount || 0) + 1,
+        steps: { ...(d.steps || {}), analyze: (d.steps || {}).analyze || Date.now() },
+      }),
     onReport: (data) =>
       updateSaved(canon(d), {
         ddReport: data.report,
@@ -1143,7 +1231,7 @@ export default function App() {
             {scanning && (
               <div className="flex items-center gap-2 mt-3" style={{ fontFamily: T.mono, fontSize: 12, color: T.green }}>
                 <span style={{ width: 8, height: 8, borderRadius: 99, background: T.green, animation: "pulse-dot 1s infinite" }} />
-                Scraping {SOURCES.filter((s) => enabled[s.id]).length} sources in parallel for {keyword.trim() ? `"${keyword.trim()}"` : "all listings"}…
+                Scraping {SOURCES.filter((s) => enabled[s.id]).length} sources for {keyword.trim() ? `"${keyword.trim()}"` : "all listings"} — starts are staggered to dodge rate limits…
               </div>
             )}
             {scanError && (

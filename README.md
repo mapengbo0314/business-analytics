@@ -6,11 +6,14 @@ listing you've saved or passed, and (optionally) emails a digest **every 5 hours
 
 ## How listings are collected (no AI involved)
 
-- **Direct scraping** — DealStream, BusinessBroker.net and Synergy Business Brokers
-  are fetched and parsed straight from their search pages.
+- **Direct scraping** — BusinessBroker.net, Synergy Business Brokers and Sunbelt
+  Network are fetched and parsed straight from their search pages (DuckDuckGo
+  site-search first, then the site itself, then Jina Reader).
 - **Search-index scraping** — BizBuySell, BizQuest and BusinessesForSale.com run
   bot protection (Akamai/Cloudflare) that blocks datacenter IPs, so their listings
   are read out of public search indexes (Bing RSS, DuckDuckGo HTML fallback) instead.
+- DealStream was removed — it CAPTCHA-blocks every access path, so it only ever
+  reported 0 listings.
 - The UI shows a per-source status chip after every pass (`N found` / `blocked` /
   `error`) — untick any source that isn't responding, so you always select
   companies from sites that are actually valid.
@@ -20,7 +23,10 @@ listing you've saved or passed, and (optionally) emails a digest **every 5 hours
 Three mechanisms, so it works on any Vercel plan:
 
 1. `/api/scan` responses are edge-cached with `s-maxage=18000` — each unique
-   site+keyword+location is re-scraped at most once per 5 hours.
+   site+keyword+location is re-scraped at most once per 5 hours. Only successful
+   scrapes get the 5-hour window: empty results are cached for just 10 minutes
+   and failures not at all, so a rate-limited source recovers quickly instead of
+   being pinned at "0 found".
 2. The frontend auto-scans on load when its cached results are older than 5 hours,
    and re-scans every 5 hours while the tab is open.
 3. `vercel.json` schedules the email digest cron. It's set to `0 12 * * *` (daily)
