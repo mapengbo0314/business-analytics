@@ -13,7 +13,7 @@ const T = {
 
 const STORAGE_KEY = "dealflow-state-v1";
 const SITES_KEY = "dealflow-sites-v1";
-const POOL_KEY = "dealflow-pool-v4"; // bump to force a fresh auto-scan after scraper fixes
+const POOL_KEY = "dealflow-pool-v5"; // bump to force a fresh auto-scan after scraper fixes
 // Mirrors api/_lib/scrape.js — the big marketplaces are read via public search
 // indexes (their own pages block server-side bots); the rest are scraped directly.
 // (DealStream was dropped: it CAPTCHA-blocks every access path, so it only ever showed 0.)
@@ -28,48 +28,8 @@ const SOURCES = [
 const REFRESH_MS = 5 * 60 * 60 * 1000; // 5 hours — matches the server-side cache & cron
 const TODAY = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
-// ---------- Seed listings — extracted and validated live, Jul 6, 2026 ----------
-const SEED_DEALS = [
-  {
-    id: "BFS-3960780",
-    name: "Residential HVAC Co. (SBA Pre-Approved)",
-    source: "BusinessesForSale.com",
-    broker: "Saint Louis Group.com (ref 3475RY)",
-    location: "Saint Louis County, MO",
-    asking: 1250000, sde: 355447, revenueT12: 1433264, established: 1986,
-    listingUrl: "https://us.businessesforsale.com/us/residential-hvac-company-sba-pre-approved.aspx",
-    website: null,
-    verify: "live", verifiedOn: "Jul 6, 2026",
-    missing: ["Business name / website (pre-NDA)", "T12 monthly P&L", "Add-back schedule", "Customer concentration", "FF&E + inventory: included in price?"],
-    note: "Stated on listing: ~40 yrs operating, 2 FT employees, 2,500 sq ft lease at $2,500/mo, owner retiring. FF&E $90,500 · Inventory $79,256.",
-  },
-  {
-    id: "BFS-3975340",
-    name: "Heating & Cooling Business — Austin",
-    source: "BusinessesForSale.com",
-    broker: "Hammer Brokers LLC (ref SSM-VZ-AUS)",
-    location: "Austin, TX",
-    asking: 255000, sde: 217400, revenueT12: 850000, established: 2017,
-    listingUrl: "https://us.businessesforsale.com/us/lucrative-heating-and-cooling-business-in-austin.aspx",
-    website: null,
-    verify: "live", verifiedOn: "Jul 6, 2026",
-    missing: ["Business name / website (pre-NDA)", "T12 monthly P&L", "Add-back schedule", "Reason for sale", "Lease terms", "Franchise affiliation?"],
-    note: "Stated on listing: est. 2017, 4 employees, vehicle + FF&E included. 1.2× multiple is unusually low, and \"national accounts\" wording suggests a possible franchise resale — verify before valuing.",
-  },
-  {
-    id: "BBS-2433694",
-    name: "Profitable Austin Area HVAC",
-    source: "BizBuySell",
-    broker: "Not stated on category page",
-    location: "Austin, TX",
-    asking: 675000, sde: 254696, revenueT12: null, established: 1986,
-    listingUrl: "https://www.bizbuysell.com/business-opportunity/profitable-austin-area-hvac/2433694/",
-    website: null,
-    verify: "partial", verifiedOn: "Jul 6, 2026",
-    missing: ["Revenue (not on category page)", "T12 monthly P&L", "Add-back schedule", "Employee count", "Lease terms"],
-    note: "Figures from BizBuySell's live Texas HVAC category page. Detail page blocks automated access, and a cached page showed $105,575 cash flow — click through to confirm current figures.",
-  },
-];
+// (Seed listings were removed: the sheet must show exactly what the latest
+// scrape returned — never stale hardcoded examples.)
 
 const money = (n) =>
   n == null ? "Not stated" : n >= 1000000 ? `$${(n / 1000000).toFixed(2)}M` : `$${Math.round(n / 1000)}K`;
@@ -700,8 +660,8 @@ export default function App() {
     try {
       const cached = JSON.parse(localStorage.getItem(POOL_KEY));
       if (cached && Array.isArray(cached.deals) && cached.deals.length) return cached.deals;
-    } catch (e) { /* no cache — fall through to seeds */ }
-    return SEED_DEALS;
+    } catch (e) { /* no cache */ }
+    return []; // empty until the auto-scan on load fills it
   });
   const [lastScanAt, setLastScanAt] = useState(() => {
     try { return JSON.parse(localStorage.getItem(POOL_KEY))?.at || null; } catch (e) { return null; }
@@ -867,34 +827,26 @@ export default function App() {
       );
       const batch = [];
       const status = {};
-      const okLabels = new Set(); // sources that actually returned listings this round
       settled.forEach((r, i) => {
-        if (r.status === "fulfilled") {
-          batch.push(...r.value);
-          status[active[i].id] = r.value.length;
-          if (r.value.length) okLabels.add(active[i].label);
-        } else { status[active[i].id] = r.reason?.siteState || "error"; }
+        if (r.status === "fulfilled") { batch.push(...r.value); status[active[i].id] = r.value.length; }
+        else { status[active[i].id] = r.reason?.siteState || "error"; }
       });
       setSiteStatus(status);
       setPage(nextPage);
       setHasScanned(true);
       const at = Date.now();
       setLastScanAt(at);
-      // Same-query scans merge per source (a source that failed this round
-      // keeps its previous listings — one throttled request shouldn't wipe
-      // what BizBuySell showed an hour ago). A CHANGED keyword/location must
-      // replace the pool outright: old-query listings are wrong answers now.
-      // Unknown provenance (fresh browser / bootstrap) counts as changed when
-      // we have new results, but an all-failed round never wipes the pool.
+      // The sheet shows EXACTLY what this scrape returned — nothing retained
+      // from earlier rounds or other queries. Sole exception: when every
+      // source fails on an UNCHANGED query, keep the last good results (the
+      // error banner explains) instead of blanking the screen.
       const q = `${keyword.trim().toLowerCase()}|${loc.trim().toLowerCase()}`;
       const sameQuery = poolQueryRef.current === q;
-      const unknownQuery = poolQueryRef.current == null;
       poolQueryRef.current = q;
       setPool((prev) => {
-        const kept = sameQuery ? prev.filter((d) => !okLabels.has(d.source)) : [];
         const merged = batch.length
-          ? dedupe(append ? [...prev, ...batch] : [...batch, ...kept])
-          : (sameQuery || unknownQuery ? prev : []);
+          ? dedupe(append ? [...prev, ...batch] : batch)
+          : (sameQuery ? prev : []);
         try { localStorage.setItem(POOL_KEY, JSON.stringify({ at, deals: merged, q })); } catch (e) { /* private mode */ }
         return merged;
       });
@@ -908,23 +860,10 @@ export default function App() {
     }
   };
 
-  // Fresh browser (no local cache): bootstrap the sheet from the shared
-  // server-side pool of previously scraped companies.
-  useEffect(() => {
-    let cached = null;
-    try { cached = JSON.parse(localStorage.getItem(POOL_KEY)); } catch (e) { /* none */ }
-    if (cached && Array.isArray(cached.deals) && cached.deals.length) return;
-    (async () => {
-      try {
-        const r = await fetch("/api/listings");
-        const data = await r.json();
-        if (r.ok && data.enabled && data.listings && data.listings.length) {
-          setPool((prev) => dedupe([...prev.filter((d) => d.verify === "live"), ...data.listings.map(enrichListing)]));
-        }
-      } catch (e) { /* pool store not configured — seeds remain */ }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // (The shared-pool bootstrap was removed: it injected listings from PAST
+  // scrapes with arbitrary keywords into a fresh browser. The auto-scan below
+  // fires immediately on a fresh browser instead, so the sheet only ever
+  // shows the current query's scrape.)
 
   // Auto-refresh: scan on load when the cached pool is older than 5 hours, then
   // re-scan every 5 hours while the tab stays open (matches server cache + cron).
