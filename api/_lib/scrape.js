@@ -300,6 +300,26 @@ function cleanName(s) {
   return name;
 }
 
+// Light stemmer so a keyword hits its word family: "manufacturer" and
+// "manufacturing" must both match listings that say either. One rule applies
+// per word, and only when the stem stays ≥4 chars ("water" must not → "wat").
+export function stemWord(w) {
+  const RULES = [
+    [/ings?$/i, ""],               // manufacturing → manufactur
+    [/[eo]rs?$/i, ""],             // manufacturer → manufactur, distributor → distribut
+    [/ies$/i, "y"],                // companies → company
+    [/(?<=[sxz]|ch|sh)es$/i, ""],  // businesses → business
+    [/(?<=[^s])s$/i, ""],          // cars → car (but not "business")
+  ];
+  for (const [re, rep] of RULES) {
+    if (re.test(w)) {
+      const out = w.replace(re, rep);
+      return out.length >= 4 ? out : w;
+    }
+  }
+  return w;
+}
+
 // Search-result titles carry the site's name as a suffix ("Growing HVAC
 // Business for Sale in Dallas - BizBuySell") and sometimes get truncated
 // mid-phrase, leaving a dangling preposition. Strip both.
@@ -709,9 +729,9 @@ function parseDdgLite(html, src) {
   return dedupeByUrl(items);
 }
 
-// DuckDuckGo site-search — proven to work from datacenter IPs and keyword+
-// location scoped, so results need no keyword post-filter. Primary path for
-// every source. Tries the html endpoint, then the lite endpoint on
+// DuckDuckGo site-search — proven to work from datacenter IPs. Results are
+// only loosely on-topic (DDG matches semantically), so they still go through
+// the keyword post-filter. Tries the html endpoint, then the lite endpoint on
 // throttle/empty (they rate-limit independently).
 async function ddgSiteSearch(src, keyword, location, page, attempts) {
   const scope = src.scope || src.domain;
@@ -749,7 +769,7 @@ async function scanSearchIndex(src, keyword, location, page, attempts, deadline 
   // DDG site-search (html endpoint, then the lite endpoint — they throttle
   // independently, so one 202 doesn't zero the source out).
   const ddgListings = await ddgSiteSearch(src, keyword, location, page, attempts);
-  if (ddgListings.length) return { status: "ok", httpStatus: 200, via: "ddg", listings: ddgListings, keywordScoped: !!keyword };
+  if (ddgListings.length) return { status: "ok", httpStatus: 200, via: "ddg", listings: ddgListings };
 
   // Search engines block datacenter IPs — read the marketplace's own search page
   // through Jina Reader instead. If the keyword-specific page yields nothing
@@ -770,11 +790,11 @@ async function scanSearchIndex(src, keyword, location, page, attempts, deadline 
   }
   if (timeLeft() > 15000) {
     const ddgSerp = await jinaDdgSerp(src, keyword, location, page, attempts);
-    if (ddgSerp.length) return { status: "ok", httpStatus: 200, via: "jina-ddg", listings: ddgSerp, keywordScoped: !!keyword };
+    if (ddgSerp.length) return { status: "ok", httpStatus: 200, via: "jina-ddg", listings: ddgSerp };
   }
   if (timeLeft() > 15000) {
     const serp = await jinaBingSerp(src, keyword, location, page, attempts);
-    if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp, keywordScoped: !!keyword };
+    if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp };
   }
   if (jina.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
@@ -793,7 +813,7 @@ async function scanDirect(src, keyword, location, page, attempts, deadline = Dat
   // 1. DDG site-search first — keyword-scoped, works from datacenter IPs, and
   //    reaches the actual detail pages even when the site bot-walls Jina.
   const ddg = await ddgSiteSearch(src, keyword, location, page, attempts);
-  if (ddg.length) return { status: "ok", httpStatus: 200, via: "ddg-html", listings: ddg, keywordScoped: !!keyword };
+  if (ddg.length) return { status: "ok", httpStatus: 200, via: "ddg-html", listings: ddg };
 
   // 2. Fetch the site's own browse page directly.
   const url = src.searchUrl(keyword, location, page);
@@ -821,11 +841,11 @@ async function scanDirect(src, keyword, location, page, attempts, deadline = Dat
   // 4. Last resorts: Jina fetches the DDG SERP, then the Bing SERP.
   if (timeLeft() > 15000) {
     const ddgSerp = await jinaDdgSerp(src, keyword, location, page, attempts);
-    if (ddgSerp.length) return { status: "ok", httpStatus: 200, via: "jina-ddg", listings: ddgSerp, keywordScoped: !!keyword };
+    if (ddgSerp.length) return { status: "ok", httpStatus: 200, via: "jina-ddg", listings: ddgSerp };
   }
   if (timeLeft() > 15000) {
     const serp = await jinaBingSerp(src, keyword, location, page, attempts);
-    if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp, keywordScoped: !!keyword };
+    if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp };
   }
   if (jina.status === 200 || r.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
@@ -858,15 +878,24 @@ export async function scanSource(siteId, keyword, location = "", page = 1, debug
     const before = r.listings.length;
     r.listings = r.listings.filter((l) => locationMatches(l, location));
     if (debug) r.droppedByLocation = before - r.listings.length;
-    // Sources whose browse pages can't carry the keyword in the URL list every
-    // industry — keep only listings that actually mention the keyword.
+    // Keyword relevance: unless the SITE's own keyword category page produced
+    // these listings (keywordScoped), every stemmed query word must appear in
+    // the listing's name or description. Search engines match semantically —
+    // "manufacturer" returns car dealerships — so their results always pass
+    // through this filter.
     if (keyword && !r.keywordScoped) {
-      const words = String(keyword).toLowerCase().split(/\s+/).filter((w) => w.length > 2);
-      if (words.length) {
-        const beforeKw = r.listings.length;
-        r.listings = r.listings.filter((l) =>
-          words.some((w) => `${l.name} ${l.note}`.toLowerCase().includes(w))
+      const stems = String(keyword).toLowerCase().split(/\s+/).map(stemWord).filter((w) => w.length >= 3);
+      if (stems.length) {
+        const res = stems.map((st) =>
+          st.length >= 4
+            ? new RegExp(`\\b${reEsc(st)}`, "i") // prefix: manufactur→manufacturing
+            : new RegExp(`\\b${reEsc(st)}(?:s|es)?\\b`, "i") // short words: exact (+plural), so "car" ≠ "carpet"
         );
+        const beforeKw = r.listings.length;
+        r.listings = r.listings.filter((l) => {
+          const hay = `${l.name} ${l.note}`;
+          return res.every((re) => re.test(hay));
+        });
         if (debug) r.droppedByKeyword = beforeKw - r.listings.length;
       }
     }

@@ -706,6 +706,11 @@ export default function App() {
   const [lastScanAt, setLastScanAt] = useState(() => {
     try { return JSON.parse(localStorage.getItem(POOL_KEY))?.at || null; } catch (e) { return null; }
   });
+  // The keyword|location the cached pool was scraped with — a scan under a
+  // different query replaces the pool instead of merging into it.
+  const poolQueryRef = useRef((() => {
+    try { return JSON.parse(localStorage.getItem(POOL_KEY))?.q ?? null; } catch (e) { return null; }
+  })());
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState(null);
   const [siteStatus, setSiteStatus] = useState(null);
@@ -875,14 +880,22 @@ export default function App() {
       setHasScanned(true);
       const at = Date.now();
       setLastScanAt(at);
+      // Same-query scans merge per source (a source that failed this round
+      // keeps its previous listings — one throttled request shouldn't wipe
+      // what BizBuySell showed an hour ago). A CHANGED keyword/location must
+      // replace the pool outright: old-query listings are wrong answers now.
+      // Unknown provenance (fresh browser / bootstrap) counts as changed when
+      // we have new results, but an all-failed round never wipes the pool.
+      const q = `${keyword.trim().toLowerCase()}|${loc.trim().toLowerCase()}`;
+      const sameQuery = poolQueryRef.current === q;
+      const unknownQuery = poolQueryRef.current == null;
+      poolQueryRef.current = q;
       setPool((prev) => {
-        // Per-source merge: a source that failed or came back empty this round
-        // keeps its previous listings — one throttled search request shouldn't
-        // wipe what BizBuySell showed an hour ago. Fresh results replace old
-        // ones for the sources that did respond (dedupe keeps first = freshest).
-        const kept = prev.filter((d) => !okLabels.has(d.source));
-        const merged = batch.length ? dedupe(append ? [...prev, ...batch] : [...batch, ...kept]) : prev;
-        try { localStorage.setItem(POOL_KEY, JSON.stringify({ at, deals: merged })); } catch (e) { /* private mode */ }
+        const kept = sameQuery ? prev.filter((d) => !okLabels.has(d.source)) : [];
+        const merged = batch.length
+          ? dedupe(append ? [...prev, ...batch] : [...batch, ...kept])
+          : (sameQuery || unknownQuery ? prev : []);
+        try { localStorage.setItem(POOL_KEY, JSON.stringify({ at, deals: merged, q })); } catch (e) { /* private mode */ }
         return merged;
       });
       if (batch.length === 0 && !append)
