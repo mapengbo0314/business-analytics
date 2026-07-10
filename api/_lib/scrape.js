@@ -411,6 +411,13 @@ function makeListing(src, name, url, text, priceHint) {
     f.sde = pf.sde;
     f.revenueT12 = pf.revenueT12;
   }
+  // Search snippets glue the site's name onto the city ("BizBuySell Collin
+  // County, TX") — scrub it from the extracted location.
+  if (f.location && src) {
+    const site = [src.label, src.domain].filter(Boolean).map(reEsc).join("|");
+    f.location =
+      f.location.replace(new RegExp(`\\b(?:${site})\\b`, "gi"), "").replace(/\s+/g, " ").replace(/^[\s,–—-]+/, "").trim() || null;
+  }
   const snippet = text.replace(/\s+/g, " ").trim().slice(0, 180);
   return {
     name,
