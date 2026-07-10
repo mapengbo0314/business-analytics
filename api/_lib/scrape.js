@@ -786,7 +786,7 @@ async function scanSearchIndex(src, keyword, location, page, attempts, deadline 
     const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.detailRe, src) : [];
     note(attempts, "jina-reader", pages[i], jina, jinaListings.length);
     if (jinaListings.length)
-      return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: i > 0, keywordScoped: keyword && i === 0 };
+      return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: i > 0 };
   }
   if (timeLeft() > 15000) {
     const ddgSerp = await jinaDdgSerp(src, keyword, location, page, attempts);
@@ -822,7 +822,7 @@ async function scanDirect(src, keyword, location, page, attempts, deadline = Dat
   const directListings = r.status === 200 ? extractFromHtml(r.body, url, src.linkRe, src) : [];
   note(attempts, "direct", url, r, directListings.length);
   if (directListings.length)
-    return { status: "ok", httpStatus: 200, via: "direct", listings: directListings, keywordScoped: !!kwInUrl };
+    return { status: "ok", httpStatus: 200, via: "direct", listings: directListings };
 
   // 3. Retry through Jina Reader (keyword page, then generic browse page).
   const pages = [url];
@@ -836,7 +836,7 @@ async function scanDirect(src, keyword, location, page, attempts, deadline = Dat
     const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.linkRe, src) : [];
     note(attempts, "jina-reader", pages[i], jina, jinaListings.length);
     if (jinaListings.length)
-      return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: !kwInUrl || i > 0, keywordScoped: kwInUrl && i === 0 };
+      return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: !kwInUrl || i > 0 };
   }
   // 4. Last resorts: Jina fetches the DDG SERP, then the Bing SERP.
   if (timeLeft() > 15000) {
@@ -878,12 +878,13 @@ export async function scanSource(siteId, keyword, location = "", page = 1, debug
     const before = r.listings.length;
     r.listings = r.listings.filter((l) => locationMatches(l, location));
     if (debug) r.droppedByLocation = before - r.listings.length;
-    // Keyword relevance: unless the SITE's own keyword category page produced
-    // these listings (keywordScoped), every stemmed query word must appear in
-    // the listing's name or description. Search engines match semantically —
-    // "manufacturer" returns car dealerships — so their results always pass
-    // through this filter.
-    if (keyword && !r.keywordScoped) {
+    // Keyword relevance — NO exemptions: every stemmed query word must appear
+    // in the listing's name or description. Search engines match semantically
+    // ("manufacturer" returns car dealerships), and even a marketplace's own
+    // keyword category URL can soft-404 into a generic everything page
+    // (bizquest.com/manufacturer-… serves ALL Texas listings), so nothing is
+    // trusted to be pre-scoped.
+    if (keyword) {
       const stems = String(keyword).toLowerCase().split(/\s+/).map(stemWord).filter((w) => w.length >= 3);
       if (stems.length) {
         const res = stems.map((st) =>
