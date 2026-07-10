@@ -14,6 +14,9 @@ for (const id of SOURCE_IDS) {
   console.log(`\n===== ${id} — status=${r.status} via=${r.via || "-"} http=${r.httpStatus} found=${r.listings.length} in ${Date.now() - t0}ms =====`);
   for (const a of r.attempts || []) {
     console.log(`  [${a.via}] ${a.httpStatus} found=${a.found} ${a.url}`);
+    // A 200 with zero extracted listings is the interesting case: show what
+    // the page actually said so extraction gaps are visible in the log.
+    if (a.httpStatus === 200 && !a.found) console.log(`    SAMPLE: ${clip(a.sample, 350)}`);
   }
   for (const l of r.listings.slice(0, 4)) {
     console.log(`  LISTING: ${l.name} | asking=${l.asking} sde=${l.sde} rev=${l.revenueT12} | ${l.location} | ${l.listingUrl}`);
@@ -26,23 +29,23 @@ for (const id of SOURCE_IDS) {
 // Raw-markdown layout probe: fetch bizquest's HVAC index via Jina and print the
 // 600 chars around its first detail link, so price-vs-link layout is visible.
 console.log("\n\n========== RAW MARKDOWN LAYOUT PROBE ==========");
-for (const id of ["bizquest", "businessbroker", "sunbelt"]) {
+for (const id of ["bizbuysell", "bizquest", "businessbroker", "sunbelt"]) {
   const src = SOURCES[id];
   const url = (src.pageUrl || src.searchUrl)(kw, loc, 1);
   const j = await fetchViaJina(url);
   console.log(`\n----- ${id} (${url}) http=${j.status} len=${(j.body || "").length} -----`);
   const body = j.body || "";
   const re = (src.detailRe || src.linkRe);
-  // find first markdown link whose URL matches the detail pattern
-  const m = [...body.matchAll(/\[([^\]]{3,200}?)\]\((https?:\/\/[^)\s]+)\)/g)]
-    .find((x) => re.test(x[2]));
-  if (m) {
-    const at = m.index;
-    console.log("CONTEXT (300 before .. 300 after the first detail link):");
-    console.log(clip(body.slice(Math.max(0, at - 300), at + 300), 620));
+  // find the first URL (markdown link or bare) that matches the detail pattern
+  const link = [...body.matchAll(/\[([^\]]{3,600}?)\]\((https?:\/\/[^)\s]+)\)/g)].find((x) => re.test(x[2]));
+  const bare = [...body.matchAll(/https?:\/\/[^\s)\]"'<>]+/g)].find((x) => re.test(x[0]));
+  const at = link ? link.index : bare ? bare.index : -1;
+  if (at >= 0) {
+    console.log(`CONTEXT (400 before .. 400 after the first detail ${link ? "markdown link" : "bare URL"}):`);
+    console.log(clip(body.slice(Math.max(0, at - 400), at + 400), 850));
   } else {
-    console.log("no detail-pattern markdown link found; first 500 chars of body:");
-    console.log(clip(body, 500));
+    console.log("no detail-pattern URL found anywhere; first 800 chars of body:");
+    console.log(clip(body, 800));
   }
 }
 console.log("\nDIAG COMPLETE");

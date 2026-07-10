@@ -191,8 +191,17 @@ const FIELDS = {
 };
 const ESTABLISHED_RE = /(?:established|est\.?|founded)\s*(?:in\s*)?[:\-–]?\s*((?:19|20)\d{2})/i;
 // "City, ST" or "City Name, Texas" — every word must be capitalized so lead-ins
-// like "Located in" don't get swallowed into the city name.
-const LOCATION_RE = /\b([A-Z][a-zA-Z.\-']+(?:\s+[A-Z][a-zA-Z.\-']+){0,3},\s*(?:[A-Z]{2}\b|[A-Z][a-z]+(?:\s[A-Z][a-z]+)?))/;
+// like "Located in" don't get swallowed into the city name, and the state part
+// must be a REAL US state (name or abbreviation): snippets are full of
+// "Something, Whatever" phrases that would otherwise parse as locations
+// ("Well-Established HVAC Business, Over").
+const STATE_WORD = [
+  ...STATE_NAMES.map((n) => n.replace(/\b[a-z]/g, (c) => c.toUpperCase()).replace(/ /g, "\\s")),
+  ...Object.keys(ABBR_TO_NAME).map((a) => a.toUpperCase()),
+].join("|");
+const LOCATION_RE = new RegExp(
+  `\\b([A-Z][a-zA-Z.\\-']+(?:\\s+[A-Z][a-zA-Z.\\-']+){0,3},\\s*(?:${STATE_WORD}))\\b`
+);
 
 export function extractFields(text) {
   const out = { asking: null, sde: null, revenueT12: null, established: null, location: null };
@@ -289,6 +298,19 @@ function cleanName(s) {
   if (BAD_NAME_RE.test(name)) return null;
   if (name.split(" ").length < 3) return null;
   return name;
+}
+
+// Search-result titles carry the site's name as a suffix ("Growing HVAC
+// Business for Sale in Dallas - BizBuySell") and sometimes get truncated
+// mid-phrase, leaving a dangling preposition. Strip both.
+const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function cleanTitle(t, src) {
+  let s = stripTags(t).replace(/\s+/g, " ").trim();
+  if (src) {
+    const site = [src.label, src.domain, `www.${src.domain}`].filter(Boolean).map(reEsc).join("|");
+    s = s.replace(new RegExp(`\\s*[-|·–—:]\\s*(?:${site})\\b.*$`, "i"), "");
+  }
+  return s.replace(/[\s,:–—-]*\b(?:in|near|at|on|for)$/i, "").trim();
 }
 
 // Listing detail pages carry a numeric ID or a long hyphenated slug; category
@@ -503,9 +525,27 @@ export function extractFromHtml(html, baseUrl, linkRe, src) {
 
 // ---------- markdown extraction (for pages fetched via Jina Reader) ----------
 
+// Flatten a markdown slice for field extraction. Line breaks become "|"
+// separators (not plain spaces): a card's title and its "City, ST" line must
+// not fuse into one phrase, or the location regex swallows trailing title
+// words as part of the city ("…Portfolio Dallas, TX").
+const mdText = (s) =>
+  String(s || "")
+    .replace(/[\\*_#>|\[\]()]/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\s*\n\s*/g, " | ")
+    .replace(/\s+/g, " ")
+    .trim();
+
 export function extractFromMarkdown(md, linkRe, src) {
   const items = [];
-  const linkMd = /\[([^\]]{3,300}?)\]\((https?:\/\/[^)\s]+)\)/g;
+  // Some sites (BusinessBroker.net) wrap the whole listing card in ONE anchor
+  // whose text starts with a nested image — "[![alt](img.jpg)Price ### Title
+  // City, ST …](detail-url)". The nested "]" breaks naive link matching, so
+  // strip image markdown up front; card text can then be long, hence the
+  // generous 600-char text window.
+  md = String(md || "").replace(/!\[[^\]]*\]\([^)]*\)/g, " ");
+  const linkMd = /\[([^\]]{3,600}?)\]\((https?:\/\/[^)\s]+)\)/g;
   const matches = [];
   let m;
   while ((m = linkMd.exec(md))) matches.push({ text: m[1], url: unwrapRedirect(m[2]), index: m.index });
@@ -519,19 +559,20 @@ export function extractFromMarkdown(md, linkRe, src) {
     }
     if (!(linkRe.test(path) || linkRe.test(a.url))) continue;
     if (!isDetail(a.url, src)) continue;
-    const name = cleanName(a.text.replace(/!\[[^\]]*\]/g, " "));
+    // Whole-card anchors put the real title in a "### Heading" inside the text.
+    let rawName = a.text;
+    const heading = rawName.match(/#{2,6}\s*([^#\n]{10,160})/);
+    if (heading) rawName = heading[1];
+    const name = cleanName(cleanTitle(rawName, src));
     if (!name) continue;
     const end = i + 1 < matches.length ? matches[i + 1].index : a.index + 2500;
-    const windowText = md
-      .slice(a.index, Math.min(end, a.index + 2500))
-      .replace(/[\\*_#>|\[\]()]/g, " ")
-      .replace(/\s+/g, " ");
+    const windowText = mdText(md.slice(a.index, Math.min(end, a.index + 2500)));
     // Index cards often print "Asking Price: $X" just BEFORE the title link.
     // Pass a short preceding slice (clamped to the previous card) so money is
     // found there when the forward window has none — kept tight to avoid
     // bleeding the previous card's price/location into this one.
     const preStart = Math.max(i > 0 ? matches[i - 1].index : 0, a.index - 120);
-    const preText = md.slice(preStart, a.index).replace(/[\\*_#>|\[\]()]/g, " ").replace(/\s+/g, " ");
+    const preText = mdText(md.slice(preStart, a.index));
     items.push(makeListing(src, name, a.url, windowText, preText));
   }
   if (items.length) return dedupeByUrl(items);
@@ -552,9 +593,9 @@ export function extractFromMarkdown(md, linkRe, src) {
     const name = nameFromSlug(url);
     if (!name) continue;
     const end = i + 1 < bare.length ? bare[i + 1].index : bare[i].index + 1500;
-    const windowText = md.slice(bare[i].index, Math.min(end, bare[i].index + 1500)).replace(/[\\*_#>|\[\]()]/g, " ").replace(/\s+/g, " ");
+    const windowText = mdText(md.slice(bare[i].index, Math.min(end, bare[i].index + 1500)));
     const preStart = Math.max(i > 0 ? bare[i - 1].index : 0, bare[i].index - 120);
-    const preText = md.slice(preStart, bare[i].index).replace(/[\\*_#>|\[\]()]/g, " ").replace(/\s+/g, " ");
+    const preText = mdText(md.slice(preStart, bare[i].index));
     items.push(makeListing(src, name, url, windowText, preText));
   }
   return dedupeByUrl(items);
@@ -576,7 +617,7 @@ function parseBingRss(xml, src) {
     const title = stripTags(pick("title"));
     const desc = stripTags(pick("description"));
     if (!link || !src.detailRe.test(link) || !isDetail(link, src)) continue;
-    const name = cleanName(title.replace(new RegExp(`\\s*[-|·]\\s*${src.label}.*$`, "i"), "")) || cleanName(title);
+    const name = cleanName(cleanTitle(title, src)) || cleanName(title);
     if (!name) continue;
     items.push(makeListing(src, name, link, `${title} ${desc}`));
   }
@@ -593,7 +634,7 @@ function parseDdgHtml(html, src) {
     if (uddg) href = decodeURIComponent(uddg[1]);
     const dre = src.detailRe || src.linkRe;
     if ((dre && !dre.test(href)) || !isDetail(href, src)) continue;
-    const name = cleanName(m[2]);
+    const name = cleanName(cleanTitle(m[2], src));
     if (!name) continue;
     const snippetMatch = m[3].match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div|span)>/i);
     const snippet = snippetMatch ? stripTags(snippetMatch[1]) : "";
@@ -608,20 +649,34 @@ const note = (attempts, via, url, r, found) =>
     sample: (r.body || r.error || "").slice(0, via === "jina-reader" ? 900 : 160),
   });
 
-// Last-resort stage for every source: have Jina fetch Bing's results for a
-// site:-scoped query. The marketplaces' own pages can bot-wall even Jina, but
-// Bing's SERP (fetched from Jina's infra) lists their listing URLs + snippets.
-async function jinaBingSerp(src, keyword, location, page, attempts) {
-  const scope = src.scope || src.domain;
-  const q = `site:${scope} ${keyword || ""} ${location || ""} for sale`.trim();
-  const url = `https://www.bing.com/search?q=${encodeURIComponent(q)}&count=30${
-    page > 1 ? `&first=${(page - 1) * 10 + 1}` : ""
-  }`;
+// Last-resort stages for every source: have Jina fetch a search engine's
+// results page for a site:-scoped query and mine the markdown for listing
+// links. The engine is hit from Jina's infrastructure — a separate rate-limit
+// bucket from our own IPs — so DDG-via-Jina can succeed when our direct DDG
+// requests are throttled, and Bing-via-Jina when Bing blocks us.
+async function jinaSerp(via, url, src, attempts) {
   const jina = await fetchViaJina(url);
   const listings =
     jina.status === 200 ? extractFromMarkdown(jina.body, src.detailRe || src.linkRe, src) : [];
-  note(attempts, "jina-bing", url, jina, listings.length);
+  note(attempts, via, url, jina, listings.length);
   return listings;
+}
+
+const siteQuery = (src, keyword, location) =>
+  `site:${src.scope || src.domain} ${keyword || ""} ${location || ""} for sale`.trim();
+
+async function jinaDdgSerp(src, keyword, location, page, attempts) {
+  const q = siteQuery(src, keyword, location);
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}${page > 1 ? `&s=${(page - 1) * 10}` : ""}`;
+  return jinaSerp("jina-ddg", url, src, attempts);
+}
+
+async function jinaBingSerp(src, keyword, location, page, attempts) {
+  const q = siteQuery(src, keyword, location);
+  const url = `https://www.bing.com/search?q=${encodeURIComponent(q)}&count=30${
+    page > 1 ? `&first=${(page - 1) * 10 + 1}` : ""
+  }`;
+  return jinaSerp("jina-bing", url, src, attempts);
 }
 
 // DuckDuckGo LITE results — simpler HTML, separate rate-limit bucket from the
@@ -639,7 +694,7 @@ function parseDdgLite(html, src) {
     if (!hrefM) continue;
     const href = unwrapRedirect(decodeEntities(hrefM[1]));
     if ((dre && !dre.test(href)) || !isDetail(href, src)) continue;
-    const name = cleanName(m[2]);
+    const name = cleanName(cleanTitle(m[2], src));
     if (!name) continue;
     const snip = m[3].match(/class="[^"]*result-snippet[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
     items.push(makeListing(src, name, href, `${stripTags(m[2])} ${snip ? stripTags(snip[1]) : ""}`));
@@ -669,7 +724,10 @@ async function ddgSiteSearch(src, keyword, location, page, attempts) {
   return liteListings;
 }
 
-async function scanSearchIndex(src, keyword, location, page, attempts) {
+async function scanSearchIndex(src, keyword, location, page, attempts, deadline = Date.now() + 45000) {
+  // Vercel caps functions at 60s — skip remaining slow fallbacks near the
+  // deadline so a bad day degrades to "empty", not a platform 504.
+  const timeLeft = () => deadline - Date.now();
   const q = `site:${src.scope} ${keyword} ${location || ""} for sale`.trim();
   const first = page > 1 ? `&first=${(page - 1) * 10 + 1}` : "";
 
@@ -696,15 +754,21 @@ async function scanSearchIndex(src, keyword, location, page, attempts) {
     if (generic !== pages[0]) pages.push(generic);
   }
   let jina = { status: 0, body: "" };
-  for (let i = 0; i < pages.length; i++) {
+  for (let i = 0; i < pages.length && timeLeft() > 15000; i++) {
     jina = await fetchViaJina(pages[i]);
     const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.detailRe, src) : [];
     note(attempts, "jina-reader", pages[i], jina, jinaListings.length);
     if (jinaListings.length)
       return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: i > 0, keywordScoped: keyword && i === 0 };
   }
-  const serp = await jinaBingSerp(src, keyword, location, page, attempts);
-  if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp, keywordScoped: !!keyword };
+  if (timeLeft() > 15000) {
+    const ddgSerp = await jinaDdgSerp(src, keyword, location, page, attempts);
+    if (ddgSerp.length) return { status: "ok", httpStatus: 200, via: "jina-ddg", listings: ddgSerp, keywordScoped: !!keyword };
+  }
+  if (timeLeft() > 15000) {
+    const serp = await jinaBingSerp(src, keyword, location, page, attempts);
+    if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp, keywordScoped: !!keyword };
+  }
   if (jina.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
   const lastDdg = [...attempts].reverse().find((a) => a.via.startsWith("ddg"));
@@ -717,7 +781,8 @@ async function scanSearchIndex(src, keyword, location, page, attempts) {
   };
 }
 
-async function scanDirect(src, keyword, location, page, attempts) {
+async function scanDirect(src, keyword, location, page, attempts, deadline = Date.now() + 45000) {
+  const timeLeft = () => deadline - Date.now();
   // 1. DDG site-search first — keyword-scoped, works from datacenter IPs, and
   //    reaches the actual detail pages even when the site bot-walls Jina.
   const ddg = await ddgSiteSearch(src, keyword, location, page, attempts);
@@ -739,16 +804,22 @@ async function scanDirect(src, keyword, location, page, attempts) {
     if (generic !== url) pages.push(generic);
   }
   let jina = { status: 0, body: "" };
-  for (let i = 0; i < pages.length; i++) {
+  for (let i = 0; i < pages.length && timeLeft() > 15000; i++) {
     jina = await fetchViaJina(pages[i]);
     const jinaListings = jina.status === 200 ? extractFromMarkdown(jina.body, src.linkRe, src) : [];
     note(attempts, "jina-reader", pages[i], jina, jinaListings.length);
     if (jinaListings.length)
       return { status: "ok", httpStatus: 200, via: "jina-reader", listings: jinaListings, usedGenericPage: !kwInUrl || i > 0, keywordScoped: kwInUrl && i === 0 };
   }
-  // 4. Last resort: Jina fetches the Bing SERP.
-  const serp = await jinaBingSerp(src, keyword, location, page, attempts);
-  if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp, keywordScoped: !!keyword };
+  // 4. Last resorts: Jina fetches the DDG SERP, then the Bing SERP.
+  if (timeLeft() > 15000) {
+    const ddgSerp = await jinaDdgSerp(src, keyword, location, page, attempts);
+    if (ddgSerp.length) return { status: "ok", httpStatus: 200, via: "jina-ddg", listings: ddgSerp, keywordScoped: !!keyword };
+  }
+  if (timeLeft() > 15000) {
+    const serp = await jinaBingSerp(src, keyword, location, page, attempts);
+    if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp, keywordScoped: !!keyword };
+  }
   if (jina.status === 200 || r.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
 
   const httpStatus = jina.status || r.status || 0;
