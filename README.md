@@ -6,12 +6,13 @@ listing you've saved or passed, and (optionally) emails a digest **every 5 hours
 
 ## How listings are collected (no AI involved)
 
-- **Direct scraping** — BusinessBroker.net, Synergy Business Brokers and Sunbelt
-  Network are fetched and parsed straight from their search pages (DuckDuckGo
-  site-search first, then the site itself, then Jina Reader).
-- **Search-index scraping** — BizBuySell, BizQuest and BusinessesForSale.com run
-  bot protection (Akamai/Cloudflare) that blocks datacenter IPs, so their listings
-  are read out of public search indexes (Bing RSS, DuckDuckGo HTML fallback) instead.
+- Every source runs a fallback ladder until one rung returns listings:
+  DuckDuckGo site-search → the site's own pages (direct sources) → Mojeek →
+  Jina Reader → DDG/Bing via Jina → the Internet Archive's latest snapshot of
+  the browse page (days old at worst, but real listings and never blocked).
+- **Jina Reader's keyless tier now bot-walls datacenter IPs.** It still works
+  with a free API key: grab one at jina.ai and add `JINA_API_KEY` in Vercel.
+  Without it the Mojeek and Internet Archive rungs carry the load.
 - DealStream was removed — it CAPTCHA-blocks every access path, so it only ever
   reported 0 listings.
 - The UI shows a per-source status chip after every pass (`N found` / `blocked` /

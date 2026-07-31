@@ -271,15 +271,30 @@ export async function fetchPage(url, extraHeaders = {}) {
 // Vercel functions run on datacenter IPs that most sites (and Bing/DDG) refuse.
 // Jina's public Reader fetches the page from its own infrastructure and returns
 // markdown — free and keyless (rate-limited, but our 5h edge cache absorbs that).
+// Jina is a shared fallback for every source, so one full refresh can fire a
+// dozen calls at it. Its keyless tier now bot-walls datacenter IPs (403 with
+// a Cloudflare challenge) — with a free JINA_API_KEY from jina.ai it works
+// again. Either way, once it refuses us, back off instead of hammering: kept
+// hammering, the whole app reads as "blocked on all requests". Module state
+// survives between invocations in warm containers.
+let jinaCooldownUntil = 0;
+export const _jinaCooldown = { get: () => jinaCooldownUntil, set: (v) => { jinaCooldownUntil = v; } };
 export async function fetchViaJina(url) {
+  if (Date.now() < jinaCooldownUntil)
+    return { status: 429, body: "", error: "jina cooling down after an earlier refusal" };
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), 14000);
   try {
     const r = await fetch(`https://r.jina.ai/${url}`, {
       signal: controller.signal,
-      headers: { accept: "text/plain, text/markdown, */*", "user-agent": UA },
+      headers: {
+        accept: "text/plain, text/markdown, */*",
+        "user-agent": UA,
+        ...(process.env.JINA_API_KEY ? { authorization: `Bearer ${process.env.JINA_API_KEY}` } : {}),
+      },
     });
     const body = await r.text();
+    if (r.status === 429 || r.status === 403) jinaCooldownUntil = Date.now() + 10 * 60 * 1000;
     return { status: r.status, body };
   } catch (err) {
     return { status: 0, body: "", error: String(err && err.message ? err.message : err) };
@@ -368,6 +383,13 @@ export function unwrapRedirect(href) {
     }
     const uddg = u.searchParams.get("uddg");
     if (uddg) return decodeURIComponent(uddg);
+    // Internet Archive snapshots rewrite every link to
+    // /web/<timestamp>/<original-url> — recover the original. (URL parsing may
+    // collapse the "//" after the scheme, hence the {1,2}.)
+    if (/(^|\.)web\.archive\.org$/i.test(u.hostname)) {
+      const m = u.pathname.match(/^\/web\/[0-9a-z_*]+\/(https?:\/{1,2}.+)/i);
+      if (m) return m[1].replace(/^(https?):\/{1,2}/i, "$1://");
+    }
   } catch { /* not a URL or not a redirect — use as-is */ }
   return href;
 }
@@ -692,6 +714,30 @@ async function jinaSerp(via, url, src, attempts) {
 const siteQuery = (src, keyword, location) =>
   `site:${src.scope || src.domain} ${keyword || ""} ${location || ""} for sale`.trim();
 
+// Mojeek — an independent search engine that serves plain HTML to datacenter
+// IPs without the throttling DDG applies and the bot wall Jina grew. Result
+// links are direct (no redirect wrapping).
+async function mojeekSerp(src, keyword, location, page, attempts) {
+  const q = siteQuery(src, keyword, location);
+  const url = `https://www.mojeek.com/search?q=${encodeURIComponent(q)}${page > 1 ? `&s=${(page - 1) * 10 + 1}` : ""}`;
+  const r = await fetchPage(url);
+  const listings = r.status === 200 ? extractFromHtml(r.body, url, src.detailRe || src.linkRe, src) : [];
+  note(attempts, "mojeek", url, r, listings.length);
+  return listings;
+}
+
+// Absolute last resort: the Internet Archive's most recent snapshot of the
+// browse page. archive.org serves datacenter IPs without complaint; the
+// snapshot can be a few days old, but every entry is a real listing from the
+// source site (links resolve to the live detail pages after unwrapping).
+async function waybackSnapshot(src, pageUrlStr, attempts) {
+  const url = `https://web.archive.org/web/2/${pageUrlStr}`;
+  const r = await fetchPage(url);
+  const listings = r.status === 200 ? extractFromHtml(r.body, url, src.detailRe || src.linkRe, src) : [];
+  note(attempts, "wayback", url, r, listings.length);
+  return listings;
+}
+
 async function jinaDdgSerp(src, keyword, location, page, attempts) {
   const q = siteQuery(src, keyword, location);
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}${page > 1 ? `&s=${(page - 1) * 10}` : ""}`;
@@ -771,6 +817,9 @@ async function scanSearchIndex(src, keyword, location, page, attempts, deadline 
   const ddgListings = await ddgSiteSearch(src, keyword, location, page, attempts);
   if (ddgListings.length) return { status: "ok", httpStatus: 200, via: "ddg", listings: ddgListings };
 
+  const mj = await mojeekSerp(src, keyword, location, page, attempts);
+  if (mj.length) return { status: "ok", httpStatus: 200, via: "mojeek", listings: mj };
+
   // Search engines block datacenter IPs — read the marketplace's own search page
   // through Jina Reader instead. If the keyword-specific page yields nothing
   // (odd keyword slugs can 404), fall back to the generic browse page and let
@@ -796,12 +845,19 @@ async function scanSearchIndex(src, keyword, location, page, attempts, deadline 
     const serp = await jinaBingSerp(src, keyword, location, page, attempts);
     if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp };
   }
-  if (jina.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
+  let wbStatus = 0;
+  if (timeLeft() > 15000) {
+    const wb = await waybackSnapshot(src, src.pageUrl(keyword, location, page), attempts);
+    if (wb.length) return { status: "ok", httpStatus: 200, via: "wayback", listings: wb };
+    wbStatus = attempts[attempts.length - 1] ? attempts[attempts.length - 1].httpStatus : 0;
+  }
+  if (jina.status === 200 || wbStatus === 200)
+    return { status: "empty", httpStatus: 200, via: "search-index", listings: [] };
 
   const lastDdg = [...attempts].reverse().find((a) => a.via.startsWith("ddg"));
   const httpStatus = jina.status || (lastDdg && lastDdg.httpStatus) || bing.status || 0;
   return {
-    status: httpStatus === 403 || httpStatus === 429 ? "blocked" : "error",
+    status: httpStatus === 429 ? "rate-limited" : httpStatus === 403 ? "blocked" : "error",
     httpStatus,
     via: "search-index",
     listings: [],
@@ -823,6 +879,10 @@ async function scanDirect(src, keyword, location, page, attempts, deadline = Dat
   note(attempts, "direct", url, r, directListings.length);
   if (directListings.length)
     return { status: "ok", httpStatus: 200, via: "direct", listings: directListings };
+
+  // 2b. Mojeek SERP — direct fetch, no throttle, no bot wall.
+  const mj = await mojeekSerp(src, keyword, location, page, attempts);
+  if (mj.length) return { status: "ok", httpStatus: 200, via: "mojeek", listings: mj };
 
   // 3. Retry through Jina Reader (keyword page, then generic browse page).
   const pages = [url];
@@ -847,11 +907,19 @@ async function scanDirect(src, keyword, location, page, attempts, deadline = Dat
     const serp = await jinaBingSerp(src, keyword, location, page, attempts);
     if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp };
   }
-  if (jina.status === 200 || r.status === 200) return { status: "empty", httpStatus: 200, via: "jina-reader", listings: [] };
+  // 5. Internet Archive snapshot of the browse page.
+  let wbStatus = 0;
+  if (timeLeft() > 15000) {
+    const wb = await waybackSnapshot(src, url, attempts);
+    if (wb.length) return { status: "ok", httpStatus: 200, via: "wayback", listings: wb };
+    wbStatus = attempts[attempts.length - 1] ? attempts[attempts.length - 1].httpStatus : 0;
+  }
+  if (jina.status === 200 || r.status === 200 || wbStatus === 200)
+    return { status: "empty", httpStatus: 200, via: "direct", listings: [] };
 
   const httpStatus = jina.status || r.status || 0;
   return {
-    status: httpStatus === 403 || httpStatus === 429 || httpStatus === 503 ? "blocked" : "error",
+    status: httpStatus === 429 ? "rate-limited" : httpStatus === 403 || httpStatus === 503 ? "blocked" : "error",
     httpStatus,
     via: "direct",
     listings: [],

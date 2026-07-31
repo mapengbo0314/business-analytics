@@ -74,7 +74,10 @@ export default async function handler(req, res) {
     // empty results only get a short window before the edge retries.
     res.setHeader("Cache-Control", "public, s-maxage=600, stale-while-revalidate=3600");
   } else {
-    res.setHeader("Cache-Control", "no-store");
+    // Failures cache briefly too (blocked / rate-limited / error). With six
+    // sources fanning out to the same upstreams, leaving failures uncached let
+    // every reload re-fire the whole chain and kept us rate-limited.
+    res.setHeader("Cache-Control", "public, s-maxage=300, stale-while-revalidate=900");
   }
   return res.status(200).json(result);
 }
