@@ -735,7 +735,26 @@ async function waybackSnapshot(src, pageUrlStr, attempts) {
   const r = await fetchPage(url);
   const listings = r.status === 200 ? extractFromHtml(r.body, url, src.detailRe || src.linkRe, src) : [];
   note(attempts, "wayback", url, r, listings.length);
-  return listings;
+  return { status: r.status, listings };
+}
+
+// Try the keyword page's snapshot first, then the generic state/browse page —
+// keyword-slug URLs are rarely archived, but the state pages are crawled
+// constantly, and the keyword post-filter narrows their listings anyway.
+async function waybackChain(src, keyword, location, page, attempts, timeLeft) {
+  const buildUrl = src.pageUrl || src.searchUrl;
+  const pages = [buildUrl(keyword, location, page)];
+  if (keyword) {
+    const generic = buildUrl("", location, page);
+    if (generic !== pages[0]) pages.push(generic);
+  }
+  let status = 0;
+  for (let i = 0; i < pages.length && timeLeft() > 15000; i++) {
+    const wb = await waybackSnapshot(src, pages[i], attempts);
+    status = wb.status || status;
+    if (wb.listings.length) return { status: 200, listings: wb.listings };
+  }
+  return { status, listings: [] };
 }
 
 async function jinaDdgSerp(src, keyword, location, page, attempts) {
@@ -845,19 +864,16 @@ async function scanSearchIndex(src, keyword, location, page, attempts, deadline 
     const serp = await jinaBingSerp(src, keyword, location, page, attempts);
     if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp };
   }
-  let wbStatus = 0;
-  if (timeLeft() > 15000) {
-    const wb = await waybackSnapshot(src, src.pageUrl(keyword, location, page), attempts);
-    if (wb.length) return { status: "ok", httpStatus: 200, via: "wayback", listings: wb };
-    wbStatus = attempts[attempts.length - 1] ? attempts[attempts.length - 1].httpStatus : 0;
-  }
-  if (jina.status === 200 || wbStatus === 200)
+  const wb = await waybackChain(src, keyword, location, page, attempts, timeLeft);
+  if (wb.listings.length) return { status: "ok", httpStatus: 200, via: "wayback", listings: wb.listings };
+  if (jina.status === 200 || wb.status === 200)
     return { status: "empty", httpStatus: 200, via: "search-index", listings: [] };
 
   const lastDdg = [...attempts].reverse().find((a) => a.via.startsWith("ddg"));
   const httpStatus = jina.status || (lastDdg && lastDdg.httpStatus) || bing.status || 0;
   return {
-    status: httpStatus === 429 ? "rate-limited" : httpStatus === 403 ? "blocked" : "error",
+    // A DDG 202 is its throttle page — transient, same bucket as a 429.
+    status: httpStatus === 429 || httpStatus === 202 ? "rate-limited" : httpStatus === 403 ? "blocked" : "error",
     httpStatus,
     via: "search-index",
     listings: [],
@@ -908,18 +924,14 @@ async function scanDirect(src, keyword, location, page, attempts, deadline = Dat
     if (serp.length) return { status: "ok", httpStatus: 200, via: "jina-bing", listings: serp };
   }
   // 5. Internet Archive snapshot of the browse page.
-  let wbStatus = 0;
-  if (timeLeft() > 15000) {
-    const wb = await waybackSnapshot(src, url, attempts);
-    if (wb.length) return { status: "ok", httpStatus: 200, via: "wayback", listings: wb };
-    wbStatus = attempts[attempts.length - 1] ? attempts[attempts.length - 1].httpStatus : 0;
-  }
-  if (jina.status === 200 || r.status === 200 || wbStatus === 200)
+  const wb = await waybackChain(src, keyword, location, page, attempts, timeLeft);
+  if (wb.listings.length) return { status: "ok", httpStatus: 200, via: "wayback", listings: wb.listings };
+  if (jina.status === 200 || r.status === 200 || wb.status === 200)
     return { status: "empty", httpStatus: 200, via: "direct", listings: [] };
 
   const httpStatus = jina.status || r.status || 0;
   return {
-    status: httpStatus === 429 ? "rate-limited" : httpStatus === 403 || httpStatus === 503 ? "blocked" : "error",
+    status: httpStatus === 429 || httpStatus === 202 ? "rate-limited" : httpStatus === 403 || httpStatus === 503 ? "blocked" : "error",
     httpStatus,
     via: "direct",
     listings: [],
