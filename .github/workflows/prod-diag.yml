@@ -43,7 +43,22 @@ jobs:
             fi
           done
           echo "chosen url=$url"
-          echo "url=$url" >> "$GITHUB_OUTPUT"
+          # Deployment-specific URLs sit behind Vercel's deployment protection
+          # ("Redirecting..." to SSO). Derive the PUBLIC production aliases from
+          # the deployment hostname (<project>-<hash>-<scope>.vercel.app) and
+          # pick the first that actually serves our API.
+          host=$(echo "$url" | sed 's#https://##; s#/.*##')
+          proj=$(echo "$host" | sed -E 's#^(.+)-[a-z0-9]+-([a-z0-9-]+-projects)\.vercel\.app$#\1#')
+          scope=$(echo "$host" | sed -E 's#^(.+)-[a-z0-9]+-([a-z0-9-]+-projects)\.vercel\.app$#\2#')
+          echo "project=$proj scope=$scope"
+          chosen=""
+          for c in "https://$proj.vercel.app" "https://$proj-$scope.vercel.app" "$url"; do
+            body=$(curl -s -L --max-time 20 "$c/api/scan?meta=1" || true)
+            echo "candidate $c -> ${body:0:120}"
+            if echo "$body" | grep -q refreshHours; then chosen="$c"; break; fi
+          done
+          echo "public url=$chosen"
+          echo "url=$chosen" >> "$GITHUB_OUTPUT"
 
       - name: Probe the DEPLOYED app's scan endpoints
         env:
@@ -51,11 +66,11 @@ jobs:
           KW: ${{ inputs.keyword }}
           LOC: ${{ inputs.location }}
         run: |
-          if [ -z "$BASE" ]; then echo "NO DEPLOYMENT URL FOUND — is Vercel connected / deploying?"; exit 1; fi
+          if [ -z "$BASE" ]; then echo "NO PUBLIC APP URL FOUND — deployment URLs are SSO-protected and no alias matched"; exit 1; fi
           echo "BASE=$BASE"
           echo "== meta (version tells us which commit is live) =="
-          curl -s --max-time 30 "$BASE/api/scan?meta=1"; echo; echo
+          curl -s -L --max-time 30 "$BASE/api/scan?meta=1"; echo; echo
           for s in bizbuysell businessesforsale bizquest businessbroker synergybb sunbelt; do
             echo "===== $s ====="
-            curl -s --max-time 90 "$BASE/api/scan?site=$s&keyword=$KW&location=$LOC&debug=1" | head -c 3500; echo; echo
+            curl -s -L --max-time 90 "$BASE/api/scan?site=$s&keyword=$KW&location=$LOC&debug=1" | head -c 3500; echo; echo
           done
