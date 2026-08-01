@@ -48,11 +48,12 @@ jobs:
           # the deployment hostname (<project>-<hash>-<scope>.vercel.app) and
           # pick the first that actually serves our API.
           host=$(echo "$url" | sed 's#https://##; s#/.*##')
-          proj=$(echo "$host" | sed -E 's#^(.+)-[a-z0-9]+-([a-z0-9-]+-projects)\.vercel\.app$#\1#')
-          scope=$(echo "$host" | sed -E 's#^(.+)-[a-z0-9]+-([a-z0-9-]+-projects)\.vercel\.app$#\2#')
+          # Deployment hosts are <project>-<9-char-hash>-<scope>.vercel.app
+          proj=$(echo "$host" | sed -E 's#^(.+)-[a-z0-9]{9}-(.+)\.vercel\.app$#\1#')
+          scope=$(echo "$host" | sed -E 's#^(.+)-[a-z0-9]{9}-(.+)\.vercel\.app$#\2#')
           echo "project=$proj scope=$scope"
           chosen=""
-          for c in "https://$proj.vercel.app" "https://$proj-$scope.vercel.app" "$url"; do
+          for c in "https://$proj.vercel.app" "https://$proj-$scope.vercel.app" "https://$proj-git-main-$scope.vercel.app" "$url"; do
             body=$(curl -s -L --max-time 20 "$c/api/scan?meta=1" || true)
             echo "candidate $c -> ${body:0:120}"
             if echo "$body" | grep -q refreshHours; then chosen="$c"; break; fi
