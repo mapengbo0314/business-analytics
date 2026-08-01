@@ -67,7 +67,8 @@ jobs:
           KW: ${{ inputs.keyword }}
           LOC: ${{ inputs.location }}
         run: |
-          if [ -z "$BASE" ]; then echo "NO PUBLIC APP URL FOUND — deployment URLs are SSO-protected and no alias matched"; exit 1; fi
+          # Diagnostic only — never mark the commit red over reachability.
+          if [ -z "$BASE" ]; then echo "NO PUBLIC APP URL FOUND — every URL is behind Vercel Deployment Protection (SSO). Disable it (Settings → Deployment Protection) or pass the public URL as the workflow input."; exit 0; fi
           echo "BASE=$BASE"
           echo "== meta (version tells us which commit is live) =="
           curl -s -L --max-time 30 "$BASE/api/scan?meta=1"; echo; echo
