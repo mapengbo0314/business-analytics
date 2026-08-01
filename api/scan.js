@@ -49,6 +49,8 @@ export default async function handler(req, res) {
       refreshHours: 5,
       // Which commit is actually serving — Vercel injects this at build time.
       version: process.env.VERCEL_GIT_COMMIT_SHA || null,
+      // True once JINA_API_KEY is set AND a deploy has picked it up.
+      jinaConfigured: !!process.env.JINA_API_KEY,
       sources: Object.entries(SOURCES).map(([id, s]) => ({ id, label: s.label, kind: s.kind })),
     });
   }
