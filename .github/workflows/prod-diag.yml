@@ -1,0 +1,61 @@
+name: prod-diag
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Deployed app base URL (blank = auto-detect from Vercel's GitHub deployments)"
+        default: ""
+        required: false
+      keyword:
+        description: "Search keyword"
+        default: "HVAC"
+        required: false
+      location:
+        description: "Location"
+        default: "Texas"
+        required: false
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      deployments: read
+      contents: read
+    steps:
+      - name: Recent deployments + find the app URL
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_URL: ${{ inputs.url }}
+        run: |
+          if [ -n "$INPUT_URL" ]; then echo "url=$INPUT_URL" >> "$GITHUB_OUTPUT"; exit 0; fi
+          deps=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${{ github.repository }}/deployments?per_page=8")
+          echo "== recent deployments (newest first) =="
+          echo "$deps" | jq -r '.[] | "\(.created_at)  sha=\(.sha[0:7])  env=\(.environment)  id=\(.id)"'
+          url=""
+          for id in $(echo "$deps" | jq -r '.[].id'); do
+            st=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${{ github.repository }}/deployments/$id/statuses?per_page=3")
+            echo "-- statuses for deployment $id --"
+            echo "$st" | jq -r '.[] | "\(.created_at)  state=\(.state)  url=\(.environment_url // "-")"'
+            if [ -z "$url" ]; then
+              url=$(echo "$st" | jq -r '[.[] | select(.state == "success" and .environment_url != null)][0].environment_url // empty')
+            fi
+          done
+          echo "chosen url=$url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Probe the DEPLOYED app's scan endpoints
+        env:
+          BASE: ${{ steps.find.outputs.url }}
+          KW: ${{ inputs.keyword }}
+          LOC: ${{ inputs.location }}
+        run: |
+          if [ -z "$BASE" ]; then echo "NO DEPLOYMENT URL FOUND — is Vercel connected / deploying?"; exit 1; fi
+          echo "BASE=$BASE"
+          echo "== meta (version tells us which commit is live) =="
+          curl -s --max-time 30 "$BASE/api/scan?meta=1"; echo; echo
+          for s in bizbuysell businessesforsale bizquest businessbroker synergybb sunbelt; do
+            echo "===== $s ====="
+            curl -s --max-time 90 "$BASE/api/scan?site=$s&keyword=$KW&location=$LOC&debug=1" | head -c 3500; echo; echo
+          done

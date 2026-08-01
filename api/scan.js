@@ -44,9 +44,11 @@ export default async function handler(req, res) {
   const { site, keyword, location = "", page = "1", meta, debug } = req.query || {};
 
   if (meta) {
-    res.setHeader("Cache-Control", "public, s-maxage=86400");
+    res.setHeader("Cache-Control", "no-store");
     return res.status(200).json({
       refreshHours: 5,
+      // Which commit is actually serving — Vercel injects this at build time.
+      version: process.env.VERCEL_GIT_COMMIT_SHA || null,
       sources: Object.entries(SOURCES).map(([id, s]) => ({ id, label: s.label, kind: s.kind })),
     });
   }
